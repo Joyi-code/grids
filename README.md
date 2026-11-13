@@ -4,6 +4,8 @@ A fast, lightweight multi-pane file manager for Windows. Up to 16 Explorer panes
 
 [한국어](README.ko.md)
 
+> **GPUI rewrite (branch `gpui-rewrite`, work in progress).** Grids is being rebuilt in Rust with [GPUI](https://www.gpui.rs): every part of the window, file lists included, is drawn by the app instead of embedding Explorer views. Layout presets 1–16 or any rows × columns up to 4 × 4, draggable splitters, per-pane history, breadcrumb address bar, sortable and resizable columns, name filter, Explorer-style selection and keys, native right-click menus, drag between panes, sessions saved to `grids-gpui.json` next to the exe, light and dark themes; Simplified Chinese by default (`GRIDS_LANG=en` for English). Build with `cargo build --release`; the code is a Cargo workspace (`crates/core` for logic, `crates/shell` for the Windows Shell layer, the GPUI app in `src/`). Credits in [THIRD_PARTY.md](THIRD_PARTY.md). The rest of this README describes the current release (0.7.x).
+
 [![Grids in motion](docs/demo.gif)](docs/demo.mp4)
 
 ▶ [Watch the full launch video with sound](docs/demo.mp4) (35 s)

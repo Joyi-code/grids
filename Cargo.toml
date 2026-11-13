@@ -22,6 +22,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 raw-window-handle = "0.6"
 log = "0.4"
 sys-locale = "0.3.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+smallvec = "1"
+unicode-segmentation = "1.13.3"
+notify = { version = "8", default-features = false }
+futures = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
