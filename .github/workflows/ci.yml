@@ -26,7 +26,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rust-toolchain.toml pins the compiler (and clippy); rustup installs it here.
       - name: Install toolchain
@@ -67,7 +67,7 @@ jobs:
           Get-ChildItem dist
 
       - name: Upload grids.exe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: grids-windows-x64
           path: dist/*
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system libraries
         run: |

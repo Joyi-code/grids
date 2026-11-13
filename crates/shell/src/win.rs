@@ -102,6 +102,7 @@ struct Pidl(*mut ITEMIDLIST);
 
 impl Pidl {
     fn parse(p: &Path) -> io::Result<Pidl> {
+        ensure_com();
         let mut pidl = std::ptr::null_mut();
         unsafe { SHParseDisplayName(&wide(p), None, &mut pidl, 0, None) }
             .map_err(|e| io::Error::other(format!("{}: {e}", p.display())))?;
@@ -563,6 +564,7 @@ pub fn background_menu(hwnd: isize, folder: &Path, pos: (i32, i32)) -> MenuActio
 // ---------- file operations ----------
 
 fn item(p: &Path) -> io::Result<IShellItem> {
+    ensure_com();
     unsafe { SHCreateItemFromParsingName(&wide(p), None) }
         .map_err(|e| io::Error::other(format!("{}: {e}", p.display())))
 }
