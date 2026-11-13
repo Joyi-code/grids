@@ -1520,11 +1520,18 @@ pub fn known_folders() -> Vec<KnownFolder> {
 
 // ---------- clipboard ----------
 
-/// The clipboard is shared: another program may hold it for a moment.
-fn open_clipboard() -> io::Result<()> {
+/// One thread of Grids at a time: with no owner window, a second thread's
+/// OpenClipboard can succeed too, and its EmptyClipboard would free the
+/// memory the first one is reading.
+static CLIPBOARD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Opens the clipboard, closed again when the guard drops. The clipboard is
+/// shared: another program may hold it for a moment.
+fn open_clipboard() -> io::Result<ClipboardGuard> {
+    let lock = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     for _ in 0..10 {
         if unsafe { OpenClipboard(None) }.is_ok() {
-            return Ok(());
+            return Ok(ClipboardGuard(lock));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1533,7 +1540,7 @@ fn open_clipboard() -> io::Result<()> {
     ))
 }
 
-struct ClipboardGuard;
+struct ClipboardGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
 impl Drop for ClipboardGuard {
     fn drop(&mut self) {
@@ -1590,8 +1597,7 @@ fn hdrop_bytes(paths: &[PathBuf]) -> Vec<u8> {
 }
 
 pub fn clipboard_set_files(paths: &[PathBuf], cut: bool) -> io::Result<()> {
-    open_clipboard()?;
-    let _guard = ClipboardGuard;
+    let _guard = open_clipboard()?;
     unsafe {
         EmptyClipboard().map_err(win_err)?;
         if paths.is_empty() {
@@ -1614,8 +1620,7 @@ pub fn clipboard_set_files(paths: &[PathBuf], cut: bool) -> io::Result<()> {
 pub fn clipboard_get_files() -> Option<(Vec<PathBuf>, bool)> {
     unsafe {
         IsClipboardFormatAvailable(CF_HDROP.0 as u32).ok()?;
-        open_clipboard().ok()?;
-        let _guard = ClipboardGuard;
+        let _guard = open_clipboard().ok()?;
         let h = GetClipboardData(CF_HDROP.0 as u32).ok()?;
         let drop = HDROP(h.0);
         let n = DragQueryFileW(drop, u32::MAX, None);
@@ -1669,8 +1674,7 @@ pub fn clipboard_image() -> Option<RgbaImage> {
         {
             return None;
         }
-        open_clipboard().ok()?;
-        let _guard = ClipboardGuard;
+        let _guard = open_clipboard().ok()?;
         if png != 0
             && let Some(img) = clipboard_bytes(png)
                 .and_then(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Png).ok())
@@ -1686,8 +1690,7 @@ pub fn clipboard_image() -> Option<RgbaImage> {
 pub fn clipboard_text() -> Option<String> {
     unsafe {
         IsClipboardFormatAvailable(CF_UNICODETEXT).ok()?;
-        open_clipboard().ok()?;
-        let _guard = ClipboardGuard;
+        let _guard = open_clipboard().ok()?;
         let b = clipboard_bytes(CF_UNICODETEXT)?;
         let units: Vec<u16> = b
             .as_chunks::<2>()
@@ -2598,10 +2601,9 @@ mod tests {
     /// Puts `data` on the clipboard as format `fmt` (test helper).
     fn put_clipboard(items: &[(u32, &[u8])]) -> bool {
         unsafe {
-            if open_clipboard().is_err() {
+            let Ok(_guard) = open_clipboard() else {
                 return false;
-            }
-            let _guard = ClipboardGuard;
+            };
             let _ = EmptyClipboard();
             for (fmt, data) in items {
                 let g = GlobalAlloc(GMEM_MOVEABLE, data.len()).unwrap();
@@ -2614,8 +2616,12 @@ mod tests {
         }
     }
 
+    /// The clipboard tests set and read back the one system clipboard.
+    static CLIPBOARD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn clipboard_image_and_text() {
+        let _one = CLIPBOARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         // a 2x1 top-down 32-bpp DIB with no alpha: red, green
         let mut dib = Vec::new();
         dib.extend(40u32.to_le_bytes());
@@ -2657,6 +2663,7 @@ mod tests {
 
     #[test]
     fn clipboard_round_trip() {
+        let _one = CLIPBOARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let files = vec![PathBuf::from(r"C:\Windows\notepad.exe")];
         if clipboard_set_files(&files, true).is_ok() {
             assert_eq!(clipboard_get_files(), Some((files, true)));
