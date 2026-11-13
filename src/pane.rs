@@ -6,7 +6,8 @@
 use crate::input::{InputEvent, TextInput};
 use crate::state::{self, tr};
 use crate::theme::{self, Theme};
-use crate::ui::{TipExt, icon, icon_button, menu_row, popover, ui_text};
+use crate::menu::{Cmd, ContextMenu as MenuView, Glyph, Item, MenuEvent};
+use crate::ui::{TipExt, icon, ui_text};
 use futures::StreamExt;
 use gpui::{prelude::FluentBuilder, *};
 use grids_core::format;
@@ -24,7 +25,8 @@ actions!(
     [
         Open, GoUp, GoBack, GoForward, Rename, Recycle, DeletePermanently, CopyFiles, CutFiles, PasteFiles, Refresh, NewFolder,
         EditAddress, FilterNames, ToggleHidden, SelectAll, CursorUp, CursorDown, PageUp, PageDown, First, Last, SelectUp,
-        SelectDown, SelectPageUp, SelectPageDown, SelectFirst, SelectLast, MoveUp, MoveDown, Escape, ContextMenu
+        SelectDown, SelectPageUp, SelectPageDown, SelectFirst, SelectLast, MoveUp, MoveDown, Escape, ContextMenu,
+        CopyPath, Properties
     ]
 );
 
@@ -67,16 +69,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Escape, c),
         KeyBinding::new("shift-f10", ContextMenu, c),
         KeyBinding::new("menu", ContextMenu, c),
+        KeyBinding::new("secondary-shift-c", CopyPath, c),
+        KeyBinding::new("alt-enter", Properties, c),
     ]);
 }
 
-pub const ROW_H: f32 = 24.;
-const HEAD_H: f32 = 36.;
-const CRUMB_H: f32 = 28.;
-const COLS_H: f32 = 26.;
-const ICON: f32 = 16.;
+/// Rows match quiet-md's sidebar rows: 30 high, radius 9 pills inset 8.
+pub const ROW_H: f32 = 30.;
+const ROW_R: f32 = 8.;
+const HEAD_H: f32 = 40.;
+const FIELD_H: f32 = 30.;
+const COLS_H: f32 = 28.;
+const ICON: f32 = 18.;
 /// Left padding of rows and the column header (the row inset plus its padding).
-const ROW_X: f32 = 6.;
+const ROW_X: f32 = 8.;
 const CELL_PAD: f32 = 8.;
 const NAME_MIN: f32 = 120.;
 
@@ -90,6 +96,8 @@ pub enum PaneEvent {
     FsChanged(Vec<PathBuf>),
     /// A message for the status bar.
     Toast(String),
+    /// Show this folder in the next pane (menu: "Open in next pane").
+    OpenInNext(PathBuf),
 }
 
 /// Files dragged from a pane.
@@ -139,10 +147,6 @@ struct RenameState {
     _subs: Vec<Subscription>,
 }
 
-struct MenuState {
-    pos: Point<Pixels>,
-    on_items: bool,
-}
 
 pub struct PaneView {
     /// Position in the grid (shown as number + 1).
@@ -157,7 +161,7 @@ pub struct PaneView {
     address: Option<(Entity<TextInput>, Vec<Subscription>)>,
     filter: Option<(Entity<TextInput>, Vec<Subscription>)>,
     rename: Option<RenameState>,
-    menu: Option<MenuState>,
+    menu: Option<(Entity<MenuView>, Subscription)>,
     load_seq: u64,
     pub loading: bool,
     _load: Option<Task<()>>,
@@ -299,24 +303,47 @@ impl PaneView {
     }
 
     /// Opens the cursor's / selected entries: a folder is entered, files open
-    /// in their default programs.
+    /// in their default programs, shortcuts to folders are entered here.
     fn open_selected(&mut self, cx: &mut Context<Self>) {
         let sel: Vec<Entry> = { let s = self.state.selection(); if s.is_empty() { self.state.cursor_entry().into_iter().cloned().collect() } else { s.into_iter().cloned().collect() } };
         if let [one] = sel.as_slice() && one.is_dir {
             return self.navigate(one.path.clone(), cx);
         }
-        for e in sel.iter().filter(|e| !e.is_dir).take(32) {
-            if let Err(err) = grids_shell::open_with_system(&e.path) {
-                cx.emit(PaneEvent::Toast(format!("{}{}: {err}", tr(cx, "无法打开 ", "Cannot open "), e.name)));
-            }
-        }
+        let files: Vec<Entry> = sel.into_iter().filter(|e| !e.is_dir).take(32).collect();
+        self.open_files(files, cx)
     }
 
     fn open_row(&mut self, r: usize, cx: &mut Context<Self>) {
         let Some(e) = self.state.row(r).cloned() else { return };
-        if e.is_dir { self.navigate(e.path, cx) } else if let Err(err) = grids_shell::open_with_system(&e.path) {
-            cx.emit(PaneEvent::Toast(format!("{}{}: {err}", tr(cx, "无法打开 ", "Cannot open "), e.name)));
-        }
+        if e.is_dir { self.navigate(e.path, cx) } else { self.open_files(vec![e], cx) }
+    }
+
+    /// Opens files one after another off the UI thread, each with its type's
+    /// default program: the shell may run its own message loop (shortcut
+    /// resolution, prompts), which must not re-enter GPUI mid-update. A
+    /// shortcut is resolved first; a single one to a folder opens in this pane.
+    fn open_files(&mut self, files: Vec<Entry>, cx: &mut Context<Self>) {
+        if files.is_empty() { return }
+        let en = state::en(cx);
+        let enter = files.len() == 1;
+        cx.spawn(async move |this, cx| {
+            let plans = cx.background_executor().spawn(async move {
+                files.into_iter().map(|e| {
+                    let link = (e.ext == "lnk").then(|| grids_shell::resolve_link(&e.path));
+                    let plan = open_plan(&e.path, link, enter);
+                    if let OpenPlan::System(p) = &plan && let Err(err) = grids_shell::open_with_system(p) {
+                        return OpenPlan::Failed(format!("{}{}: {err}", if en { "Cannot open " } else { "无法打开 " }, e.name));
+                    }
+                    plan
+                }).collect::<Vec<_>>()
+            }).await;
+            let _ = this.update(cx, |this, cx| for plan in plans { match plan {
+                OpenPlan::Enter(dir) => this.navigate(dir, cx),
+                OpenPlan::Missing(t) => cx.emit(PaneEvent::Toast(format!("{}{}", if en { "Shortcut target not found: " } else { "快捷方式的目标不存在：" }, t.display()))),
+                OpenPlan::Failed(msg) => cx.emit(PaneEvent::Toast(msg)),
+                OpenPlan::System(_) => {}
+            } });
+        }).detach();
     }
 
     // ---- keyboard
@@ -387,7 +414,9 @@ impl PaneView {
             self.navigate(p, cx);
         } else if p.is_file() {
             if let Some(parent) = p.parent() { self.navigate(parent.to_path_buf(), cx) }
-            let _ = grids_shell::open_with_system(&p);
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+            self.open_files(vec![Entry { name, path: p, is_dir: false, size: 0, modified: None, hidden: false, ext }], cx);
         } else {
             cx.emit(PaneEvent::Toast(format!("{}{}", tr(cx, "找不到路径：", "Path not found: "), p.display())));
             cx.notify();
@@ -396,7 +425,7 @@ impl PaneView {
 
     // ---- filter
 
-    fn start_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn start_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((input, _)) = &self.filter { input.read(cx).focus(window); return }
         let input = cx.new(|cx| TextInput::new(&self.state.filter, tr(cx, "按名称筛选", "Filter by name"), cx));
         let subs = vec![cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
@@ -492,8 +521,12 @@ impl PaneView {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some((paths, cut)) = state::get_clipboard(cx) else { return };
         let dest = self.state.path.clone();
+        self.paste_into(dest, cx)
+    }
+
+    fn paste_into(&mut self, dest: PathBuf, cx: &mut Context<Self>) {
+        let Some((paths, cut)) = state::get_clipboard(cx) else { return };
         let names: Vec<String> = paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         if cut { cx.global_mut::<state::Shared>().clipboard = None }
         self.run_op(if cut { Op::Move } else { Op::Copy }, paths, Some(dest), names, cx);
@@ -553,88 +586,214 @@ impl PaneView {
 
     // ---- context menu
 
+    /// Opens the GPUI menu for the selection (`row`) or the folder background.
     fn context_menu(&mut self, row: Option<usize>, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
         if let Some(r) = row && !self.state.is_selected(r) { self.state.click(Some(r), false, false) }
         if row.is_none() { self.state.clear_selection() }
-        cx.notify();
-        if cfg!(windows) {
-            let targets = self.state.targets();
-            let folder = self.state.path.clone();
-            let hwnd = grids_shell::hwnd_of(window);
-            let scale = window.scale_factor();
-            let origin = window.bounds().origin;
-            let screen = ((f32::from(origin.x + pos.x) * scale) as i32, (f32::from(origin.y + pos.y) * scale) as i32);
-            let on_items = row.is_some();
-            // The menu runs a modal loop: call it outside any app borrow.
-            cx.spawn_in(window, async move |this, cx| {
-                let action = if on_items { grids_shell::context_menu(hwnd, &targets, screen) } else { grids_shell::background_menu(hwnd, &folder, screen) };
-                let _ = this.update_in(cx, |this, window, cx| match action {
-                    grids_shell::MenuAction::Dismissed => {}
-                    grids_shell::MenuAction::Rename => this.start_rename(window, cx),
-                    grids_shell::MenuAction::Invoked(_) => this.load(None, cx),
+        let en = state::en(cx);
+        let t = move |zh: &'static str, e: &'static str| -> SharedString { (if en { e } else { zh }).into() };
+        let can_paste = state::get_clipboard(cx).is_some();
+        let more = Item::row(t("显示更多选项", "Show more options"), "ellipsis", "", Cmd::More).enabled(cfg!(windows));
+        let open_with_label = t("打开方式", "Open with");
+        let mut open_with_for = None;
+        let items = if row.is_some() {
+            let sel: Vec<Entry> = self.state.selection().into_iter().cloned().collect();
+            let one = sel.len() == 1;
+            let folder = sel.first().filter(|e| one && e.is_dir).map(|e| e.path.clone());
+            let file = sel.first().filter(|e| one && !e.is_dir).map(|e| e.path.clone());
+            let mut v = vec![Item::row(t("打开", "Open"), if folder.is_some() { "folder-open" } else { "external-link" }, "Enter", Cmd::Open)];
+            if let Some(f) = &file {
+                open_with_for = Some(f.clone());
+                v.push(Item::sub(open_with_label.clone(), "app-window", vec![Item::Note(t("正在读取…", "Loading…"))]));
+            }
+            if folder.is_some() { v.push(Item::row(t("在下一格中打开", "Open in next pane"), "square-split-horizontal", "", Cmd::OpenInNextPane)) }
+            v.push(Item::Sep);
+            v.push(Item::row(t("剪切", "Cut"), "scissors", "Ctrl+X", Cmd::Cut));
+            v.push(Item::row(t("复制", "Copy"), "copy", "Ctrl+C", Cmd::Copy));
+            if let Some(dir) = &folder { v.push(Item::row(t("粘贴到此文件夹", "Paste into folder"), "clipboard-paste", "", Cmd::PasteInto(dir.clone())).enabled(can_paste)) }
+            v.push(Item::row(t("复制路径", "Copy as path"), "link", "Ctrl+Shift+C", Cmd::CopyPath));
+            v.push(Item::row(t("重命名", "Rename"), "pencil", "F2", Cmd::Rename).enabled(one));
+            v.push(Item::row(t("删除", "Delete"), "trash-2", "Delete", Cmd::Delete));
+            v.push(Item::Sep);
+            v.push(Item::row(t("压缩为 ZIP 文件", "Compress to ZIP file"), "file-archive", "", Cmd::Zip));
+            if let Some(dir) = &folder {
+                let fav = state::shared(cx).config.is_favourite(dir);
+                v.push(Item::row(if fav { t("从收藏夹移除", "Remove from favourites") } else { t("添加到收藏夹", "Add to favourites") }, if fav { "star-off" } else { "star" }, "", Cmd::ToggleFavourite(dir.clone())));
+            }
+            v.push(Item::row(t("在资源管理器中显示", "Show in Explorer"), "folder-search", "", Cmd::Reveal));
+            v.push(Item::row(t("属性", "Properties"), "info", "Alt+Enter", Cmd::Properties).enabled(cfg!(windows)));
+            v.push(Item::Sep);
+            v.push(more);
+            v
+        } else {
+            let st = &self.state;
+            let sort = |label: SharedString, key: SortKey| Item::check(label, st.sort == key, "", Cmd::Sort(key));
+            let sort_items = vec![
+                sort(t("名称", "Name"), SortKey::Name),
+                sort(t("修改日期", "Date modified"), SortKey::Modified),
+                sort(t("类型", "Type"), SortKey::Type),
+                sort(t("大小", "Size"), SortKey::Size),
+                Item::Sep,
+                Item::check(t("递增", "Ascending"), st.ascending, "", Cmd::Ascending(true)),
+                Item::check(t("递减", "Descending"), !st.ascending, "", Cmd::Ascending(false)),
+            ];
+            let view = vec![
+                Item::sub(t("排序方式", "Sort by"), "arrow-up-down", sort_items),
+                Item::check(t("显示隐藏的项目", "Show hidden items"), st.show_hidden, "Ctrl+H", Cmd::ToggleHidden),
+            ];
+            let mut new_items = vec![Item::row(t("文件夹", "Folder"), "folder", "Ctrl+Shift+N", Cmd::NewFolder), Item::Sep];
+            for n in state::new_items(cx).iter() {
+                let glyph = n.icon.clone().map_or(Glyph::Icon("file"), Glyph::Image);
+                new_items.push(Item::Row { label: n.name.clone().into(), glyph, keys: "", enabled: true, cmd: Some(Cmd::NewFile(n.ext.clone())), sub: None });
+            }
+            vec![
+                Item::sub(t("查看", "View"), "eye", view),
+                Item::row(t("刷新", "Refresh"), "refresh-cw", "F5", Cmd::Refresh),
+                Item::Sep,
+                Item::row(t("粘贴", "Paste"), "clipboard-paste", "Ctrl+V", Cmd::Paste).enabled(can_paste),
+                Item::sub(t("新建", "New"), "plus", new_items),
+                Item::Sep,
+                Item::row(t("在终端中打开", "Open in Terminal"), "terminal", "", Cmd::Terminal),
+                Item::row(t("复制文件夹路径", "Copy folder path"), "link", "", Cmd::CopyFolderPath),
+                Item::row(t("属性", "Properties"), "info", "", Cmd::FolderProperties).enabled(cfg!(windows)),
+                Item::Sep,
+                more,
+            ]
+        };
+        let menu = cx.new(|cx| MenuView::new(items, pos, 264., cx));
+        let sub = cx.subscribe_in(&menu, window, move |this, _, ev: &MenuEvent, window, cx| {
+            let pos = pos;
+            this.menu = None;
+            window.focus(&this.focus);
+            if let MenuEvent::Pick(cmd) = ev { this.run_cmd(cmd.clone(), row, pos, window, cx) }
+            cx.notify();
+        });
+        // After the click's own handling: GPUI focuses the clicked pane as the event bubbles.
+        let mf = menu.read(cx).focus.clone();
+        window.defer(cx, move |window, _| mf.focus(window));
+        // The handlers come from the shell, which may read the registry for a while.
+        if let Some(path) = open_with_for {
+            let m = menu.downgrade();
+            let label = open_with_label.to_string();
+            cx.spawn(async move |_, cx| {
+                let handlers = cx.background_executor().spawn(async move { grids_shell::open_with_handlers(&path) }).await;
+                let _ = m.update(cx, |m, cx| {
+                    let mut v: Vec<Item> = handlers.into_iter().map(|h| Item::Row {
+                        label: h.name.into(),
+                        glyph: h.icon.map_or(Glyph::Icon("app-window"), |i| Glyph::Image(state::render_image(&i))),
+                        keys: "", enabled: true, cmd: Some(Cmd::OpenWith(h.id)), sub: None,
+                    }).collect();
+                    if !v.is_empty() { v.push(Item::Sep) }
+                    v.push(Item::row(if en { "Choose another app" } else { "选择其他应用" }, "layout-grid", "", Cmd::OpenWithOther));
+                    m.set_submenu(&label, v, cx);
                 });
             }).detach();
-            return;
         }
-        self.menu = Some(MenuState { pos, on_items: row.is_some() });
+        self.menu = Some((menu, sub));
+        cx.notify();
     }
 
-    fn render_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let m = self.menu.as_ref()?;
-        let can_paste = state::get_clipboard(cx).is_some();
-        let group: SharedString = "pane-menu".into();
-        let item = |id: &'static str, glyph: &'static str, label: &'static str, keys: &'static str| {
-            menu_row(id, group.clone())
-                .child(icon(glyph, 16., Theme::icon()))
-                .child(div().flex_1().whitespace_nowrap().child(label))
-                .child(div().text_color(Theme::text_caption()).text_size(px(theme::UI_SMALL)).child(keys))
+    /// Carries out a menu command.
+    fn run_cmd(&mut self, cmd: Cmd, row: Option<usize>, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let en = state::en(cx);
+        let hwnd = grids_shell::hwnd_of(window);
+        let toast = move |this: &mut Self, r: std::io::Result<()>, cx: &mut Context<Self>| if let Err(e) = r && e.kind() != std::io::ErrorKind::Interrupted { let _ = this; cx.emit(PaneEvent::Toast(e.to_string())) };
+        let bg = |this: &mut Self, f: Box<dyn FnOnce() -> std::io::Result<()> + Send>, cx: &mut Context<Self>| {
+            let _ = this;
+            cx.spawn(async move |this, cx| {
+                let r = cx.background_executor().spawn(async move { f() }).await;
+                let _ = this.update(cx, |this, cx| toast(this, r, cx));
+            }).detach();
         };
-        let sep = || div().h(px(9.)).flex().items_center().mx(px(13.)).child(div().h(px(1.)).flex_1().bg(Theme::line_divider()));
-        let mut col = popover().w(px(220.)).py(px(5.)).flex().flex_col().text_size(px(theme::UI_SIZE)).occlude();
-        if m.on_items {
-            col = col
-                .child(item("m-open", "external-link", tr(cx, "打开", "Open"), "Enter").on_click(cx.listener(|this, _, _, cx| { this.menu = None; this.open_selected(cx) })))
-                .child(sep())
-                .child(item("m-cut", "scissors", tr(cx, "剪切", "Cut"), "Ctrl+X").on_click(cx.listener(|this, _, _, cx| { this.menu = None; this.copy_files(true, cx) })))
-                .child(item("m-copy", "copy", tr(cx, "复制", "Copy"), "Ctrl+C").on_click(cx.listener(|this, _, _, cx| { this.menu = None; this.copy_files(false, cx) })))
-                .child(item("m-rename", "pencil", tr(cx, "重命名", "Rename"), "F2").on_click(cx.listener(|this, _, window, cx| { this.menu = None; this.start_rename(window, cx) })))
-                .child(item("m-delete", "trash-2", tr(cx, "删除", "Delete"), "Del").on_click(cx.listener(|this, _, _, cx| {
-                    this.menu = None;
-                    let t = this.state.targets();
-                    this.run_op(Op::Recycle, t, None, vec![], cx)
-                })))
-                .child(sep())
-                .child(item("m-reveal", "folder-open", tr(cx, "在文件管理器中显示", "Show in file manager"), "").on_click(cx.listener(|this, _, _, cx| {
-                    this.menu = None;
-                    if let Some(p) = this.state.targets().first() { let _ = grids_shell::reveal_in_explorer(p); }
-                    cx.notify()
-                })));
-        } else {
-            let hidden = self.state.show_hidden;
-            col = col
-                .child(item("m-new", "folder-plus", tr(cx, "新建文件夹", "New folder"), "F7").on_click(cx.listener(|this, _, window, cx| { this.menu = None; this.new_folder(window, cx) })))
-                .when(can_paste, |d| d.child(item("m-paste", "clipboard-paste", tr(cx, "粘贴", "Paste"), "Ctrl+V").on_click(cx.listener(|this, _, _, cx| { this.menu = None; this.paste(cx) }))))
-                .child(sep())
-                .child(item("m-refresh", "refresh-cw", tr(cx, "刷新", "Refresh"), "F5").on_click(cx.listener(|this, _, _, cx| { this.menu = None; this.load(None, cx) })))
-                .child(item("m-hidden", if hidden { "eye-off" } else { "eye" }, if hidden { tr(cx, "不显示隐藏的项目", "Hide hidden items") } else { tr(cx, "显示隐藏的项目", "Show hidden items") }, "Ctrl+H")
-                    .on_click(cx.listener(|this, _, _, cx| { this.menu = None; this.toggle_hidden(cx) })))
-                .child(item("m-open-dir", "folder-open", tr(cx, "在文件管理器中打开", "Open in file manager"), "").on_click(cx.listener(|this, _, _, cx| {
-                    this.menu = None;
-                    let _ = grids_shell::open_with_system(&this.state.path);
-                    cx.notify()
-                })));
+        let targets = self.state.targets();
+        let first = targets.first().cloned();
+        let dir = self.state.path.clone();
+        match cmd {
+            Cmd::Open => self.open_selected(cx),
+            Cmd::OpenWith(id) => if let Some(p) = first { bg(self, Box::new(move || grids_shell::open_with(&p, &id)), cx) },
+            Cmd::OpenWithOther => if let Some(p) = first {
+                cx.spawn_in(window, async move |this, cx| { let r = grids_shell::open_with_dialog(hwnd, &p); let _ = this.update(cx, |this, cx| toast(this, r, cx)); }).detach();
+            },
+            Cmd::OpenInNextPane => if let Some(p) = first { cx.emit(PaneEvent::OpenInNext(p)) },
+            Cmd::Cut => self.copy_files(true, cx),
+            Cmd::Copy => self.copy_files(false, cx),
+            Cmd::Paste => self.paste(cx),
+            Cmd::PasteInto(d) => self.paste_into(d, cx),
+            Cmd::CopyPath => self.copy_paths(cx),
+            Cmd::Rename => self.start_rename(window, cx),
+            Cmd::Delete => self.run_op(Op::Recycle, targets, None, vec![], cx),
+            Cmd::Zip => if let Some(p) = first {
+                let stem = if targets.len() == 1 { p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() } else { dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "archive".into()) };
+                let name = paths::unique_name(&dir, &format!("{stem}.zip"));
+                let dest = dir.join(&name);
+                let dirs = vec![dir.clone()];
+                self.pending_select = Some(vec![name]);
+                cx.spawn(async move |this, cx| {
+                    let r = cx.background_executor().spawn(async move { grids_shell::compress_zip(&targets, &dest) }).await;
+                    let _ = this.update(cx, |this, cx| { toast(this, r, cx); cx.emit(PaneEvent::FsChanged(dirs)) });
+                }).detach();
+            },
+            Cmd::ToggleFavourite(p) => {
+                cx.global_mut::<state::Shared>().config.toggle_favourite(&p);
+                cx.emit(PaneEvent::Changed);
+            }
+            Cmd::Reveal => if let Some(p) = first { bg(self, Box::new(move || grids_shell::reveal_in_explorer(&p)), cx) },
+            Cmd::Properties => if !targets.is_empty() {
+                cx.spawn_in(window, async move |this, cx| { let r = grids_shell::properties(hwnd, &targets); let _ = this.update(cx, |this, cx| toast(this, r, cx)); }).detach();
+            },
+            Cmd::FolderProperties => {
+                cx.spawn_in(window, async move |this, cx| { let r = grids_shell::properties(hwnd, &[dir]); let _ = this.update(cx, |this, cx| toast(this, r, cx)); }).detach();
+            }
+            Cmd::More => self.native_menu(row.is_some(), pos, window, cx),
+            Cmd::Sort(k) => { if self.state.sort != k { self.sort_by(k, cx) } }
+            Cmd::Ascending(up) => { if self.state.ascending != up { let k = self.state.sort; self.sort_by(k, cx) } }
+            Cmd::ToggleHidden => self.toggle_hidden(cx),
+            Cmd::Refresh => self.load(None, cx),
+            Cmd::NewFolder => self.new_folder(window, cx),
+            Cmd::NewFile(ext) => match grids_shell::create_new(&dir, &ext) {
+                Ok(p) => {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if let Ok(list) = listing::read_dir(&dir) {
+                        self.state.set_entries(list, Some(&name));
+                        self.start_rename(window, cx);
+                    }
+                }
+                Err(e) => cx.emit(PaneEvent::Toast(format!("{}{e}", if en { "Cannot create file: " } else { "无法新建文件：" }))),
+            },
+            Cmd::Terminal => bg(self, Box::new(move || grids_shell::open_terminal(&dir)), cx),
+            Cmd::CopyFolderPath => {
+                cx.write_to_clipboard(ClipboardItem::new_string(dir.to_string_lossy().into_owned()));
+                cx.emit(PaneEvent::Toast((if en { "Copied the folder path" } else { "已复制文件夹路径" }).into()));
+            }
         }
-        Some(
-            deferred(
-                anchored()
-                    .position(m.pos)
-                    .snap_to_window_with_margin(px(8.))
-                    .child(div().on_mouse_down_out(cx.listener(|this, _, _, cx| { this.menu = None; cx.notify() })).child(col)),
-            )
-            .with_priority(5)
-            .into_any_element(),
-        )
+    }
+
+    /// "Copy as path": quoted paths, one per line, as Explorer does.
+    fn copy_paths(&mut self, cx: &mut Context<Self>) {
+        let t = self.state.targets();
+        if t.is_empty() { return }
+        let text = t.iter().map(|p| format!("\"{}\"", p.display())).collect::<Vec<_>>().join("\r\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        cx.emit(PaneEvent::Toast(if state::en(cx) { format!("Copied {} path(s)", t.len()) } else { format!("已复制 {} 个路径", t.len()) }));
+    }
+
+    /// The system's own menu (third-party entries such as WPS or 7-Zip).
+    fn native_menu(&mut self, on_items: bool, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.state.targets();
+        let folder = self.state.path.clone();
+        let hwnd = grids_shell::hwnd_of(window);
+        let scale = window.scale_factor();
+        let origin = window.bounds().origin;
+        let screen = ((f32::from(origin.x + pos.x) * scale) as i32, (f32::from(origin.y + pos.y) * scale) as i32);
+        // The menu runs a modal loop: call it outside any app borrow.
+        cx.spawn_in(window, async move |this, cx| {
+            let action = if on_items && !targets.is_empty() { grids_shell::context_menu(hwnd, &targets, screen) } else { grids_shell::background_menu(hwnd, &folder, screen) };
+            let _ = this.update_in(cx, |this, window, cx| match action {
+                grids_shell::MenuAction::Dismissed => {}
+                grids_shell::MenuAction::Rename => this.start_rename(window, cx),
+                grids_shell::MenuAction::Invoked(_) => this.load(None, cx),
+            });
+        }).detach();
     }
 
     fn toggle_hidden(&mut self, cx: &mut Context<Self>) {
@@ -657,8 +816,8 @@ impl PaneView {
     fn fit_columns(&self, avail: f32) -> [f32; 4] {
         let c = &self.columns;
         let mut w = [c.name, c.modified, c.kind, c.size];
-        let room = avail - ROW_X * 2. - 4.;
-        let floors: [(usize, f32); 5] = [(0, 160.), (2, 88.), (1, 96.), (3, 64.), (0, NAME_MIN)];
+        let room = avail - ROW_X * 2. - 2.;
+        let floors: [(usize, f32); 5] = [(0, 160.), (2, 104.), (1, 96.), (3, 64.), (0, NAME_MIN)];
         for (i, floor) in floors {
             let over = w.iter().sum::<f32>() - room;
             if over <= 0. { break }
@@ -711,43 +870,74 @@ fn error_text(e: &std::io::Error, en: bool) -> String {
 // ---------------------------------------------------------------- rendering
 
 impl PaneView {
+    /// One light row: the pane number, the path as breadcrumbs (the folder
+    /// itself in the title weight), and buttons that stay faint until the
+    /// pane is hovered or active. A click on the empty part edits the path.
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let st = &self.state;
         let fav = state::shared(cx).config.is_favourite(&st.path);
-        let name = paths::display_name(&st.path);
+        let en = state::en(cx);
+        let t = move |zh: &'static str, e: &'static str| if en { e } else { zh };
         let badge = div()
             .flex_none()
-            .min_w(px(20.))
-            .h(px(20.))
-            .px(px(5.))
+            .min_w(px(18.))
+            .h(px(18.))
+            .px(px(4.))
             .rounded(px(5.))
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(theme::UI_SMALL))
+            .text_size(px(11.))
             .font_weight(FontWeight::SEMIBOLD)
-            .map(|d| if self.active { d.bg(Theme::primary()).text_color(gpui::white()) } else { d.bg(Theme::fill_hover_strong()).text_color(Theme::text_caption()) })
+            .map(|d| if self.active { d.bg(Theme::primary()).text_color(gpui::white()) } else { d.text_color(Theme::text_placeholder()) })
             .child((self.index + 1).to_string());
-        let en = state::en(cx);
-        let t = move |zh: &'static str, e: &'static str| if en { e } else { zh };
+        let path_area: AnyElement = if let Some((input, _)) = &self.address {
+            div().flex_1().min_w_0().h(px(FIELD_H)).px(px(8.)).rounded(px(8.)).flex().items_center().bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).child(div().flex_1().min_w_0().child(input.clone())).into_any_element()
+        } else {
+            let crumbs = paths::breadcrumbs(&st.path);
+            let n = crumbs.len();
+            let mut row = div().flex().flex_none().items_center();
+            for (i, (label, path)) in crumbs.into_iter().enumerate() {
+                let last = i + 1 == n;
+                row = row.child(
+                    div().id(("crumb", i)).flex_none().h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().whitespace_nowrap().cursor_pointer()
+                        .map(|d| if last { d.text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()) } else { d.text_size(px(13.)).text_color(Theme::text_caption()) })
+                        .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.navigate(path.clone(), cx) })),
+                );
+                if !last { row = row.child(div().mx(px(1.)).flex_none().child(icon("chevron-right", 12., Theme::icon_muted()))) }
+            }
+            // Long paths keep their end (the folder) in view.
+            div().id("crumbs").flex_1().min_w_0().h(px(FIELD_H)).flex().items_center().justify_end().overflow_hidden().cursor_text()
+                .child(row).child(div().flex_1().min_w(px(12.)))
+                .on_click(cx.listener(|this, _, window, cx| this.edit_address(window, cx)))
+                .into_any_element()
+        };
+        let quiet = !self.active;
+        let btn = |id: &'static str, glyph: &'static str, enabled: bool| {
+            div().id(id).size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center()
+                .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))
+                .child(icon(glyph, 16., if enabled { Theme::icon() } else { Theme::text_disabled() }))
+        };
         div()
             .h(px(HEAD_H))
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(8.))
-            .pl(px(10.))
-            .pr(px(6.))
+            .gap(px(6.))
+            .pl(px(12.))
+            .pr(px(8.))
             .child(badge)
-            .child(icon("folder-fill", 16., theme::kind_color(grids_core::FileKind::Folder)))
-            .child(div().flex_1().min_w_0().overflow_hidden().font_weight(FontWeight::MEDIUM).text_color(Theme::text()).whitespace_nowrap().text_ellipsis().child(ui_text(name)))
+            .child(path_area)
             .child(
                 div().flex().flex_none().items_center().gap(px(1.))
-                    .child(icon_button("back", "arrow-left", 26., 16., st.can_back()).tip(t("后退", "Back"), Some("Alt+←")).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
-                    .child(icon_button("fwd", "arrow-right", 26., 16., st.can_forward()).tip(t("前进", "Forward"), Some("Alt+→")).on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))))
-                    .child(icon_button("up", "arrow-up", 26., 16., st.can_up()).tip(t("上一级", "Up"), Some("Alt+↑")).on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
+                    .when(quiet, |d| d.opacity(0.).group_hover("pane", |s| s.opacity(1.)))
+                    .child(btn("back", "arrow-left", st.can_back()).tip(t("后退", "Back"), Some("Alt+←")).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
+                    .child(btn("fwd", "arrow-right", st.can_forward()).tip(t("前进", "Forward"), Some("Alt+→")).on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))))
+                    .child(btn("up", "arrow-up", st.can_up()).tip(t("上一级", "Up"), Some("Alt+↑")).on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
                     .child(
-                        div().id("fav").size(px(26.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer()
+                        div().id("fav").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
                             .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
                             .child(if fav { icon("star-fill", 16., Theme::star()) } else { icon("star", 16., Theme::icon()) })
                             .tip(if fav { t("取消收藏", "Remove from favourites") } else { t("收藏此文件夹", "Add to favourites") }, None)
@@ -761,39 +951,16 @@ impl PaneView {
             )
     }
 
-    fn render_crumbs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let bar = div().id("crumbs").h(px(CRUMB_H)).flex_none().mx(px(8.)).mb(px(4.)).rounded(px(6.)).flex().items_center().overflow_hidden();
-        if let Some((input, _)) = &self.address {
-            return bar.px(px(8.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).child(div().flex_1().min_w_0().child(input.clone())).into_any_element();
-        }
-        let crumbs = paths::breadcrumbs(&self.state.path);
-        let n = crumbs.len();
-        let mut row = div().flex().flex_none().items_center().pl(px(4.));
-        for (i, (label, path)) in crumbs.into_iter().enumerate() {
-            let last = i + 1 == n;
-            row = row.child(
-                div().id(("crumb", i)).flex_none().h(px(22.)).px(px(6.)).rounded(px(5.)).flex().items_center().whitespace_nowrap().cursor_pointer()
-                    .text_color(if last { Theme::text() } else { Theme::text_caption() })
-                    .hover(|s| s.bg(Theme::fill_hover_strong()).text_color(Theme::text()))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.navigate(path.clone(), cx) })),
-            );
-            if !last { row = row.child(icon("chevron-right", 12., Theme::icon_muted())) }
-        }
-        bar.bg(Theme::field()).cursor_text()
-            .child(div().flex_1().min_w_0().h_full().flex().items_center().justify_end().overflow_hidden().child(row).child(div().flex_1()))
-            .on_click(cx.listener(|this, _, window, cx| this.edit_address(window, cx)))
-            .into_any_element()
-    }
-
     fn render_filter(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (input, _) = self.filter.as_ref()?;
         Some(
-            div().h(px(CRUMB_H)).flex_none().mx(px(8.)).mb(px(4.)).px(px(8.)).gap(px(6.)).rounded(px(6.)).flex().items_center()
-                .bg(Theme::bg_body()).border_1().border_color(Theme::field_edge())
-                .child(icon("filter", 14., Theme::icon_muted()))
+            div().h(px(FIELD_H)).flex_none().mx(px(10.)).mb(px(4.)).px(px(10.)).gap(px(8.)).rounded(px(9.)).flex().items_center()
+                .bg(Theme::fill_hover())
+                .child(icon("search", 15., Theme::icon()))
                 .child(div().flex_1().min_w_0().child(input.clone()))
-                .child(icon_button("filter-x", "x", 20., 14., true).on_click(cx.listener(|this, _, window, cx| this.end_filter(window, cx)))),
+                .child(div().id("filter-x").size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().cursor_pointer().hover(|s| s.bg(Theme::fill_hover_strong()))
+                    .child(icon("x", 14., Theme::icon()))
+                    .on_click(cx.listener(|this, _, window, cx| this.end_filter(window, cx)))),
         )
     }
 
@@ -806,7 +973,8 @@ impl PaneView {
             (SortKey::Type, if en { "Type" } else { "类型" }, widths[2], false),
             (SortKey::Size, if en { "Size" } else { "大小" }, widths[3], true),
         ];
-        let mut row = div().relative().h(px(COLS_H)).flex_none().flex().items_center().px(px(ROW_X)).text_size(px(theme::UI_SMALL)).text_color(Theme::list_header()).border_b_1().border_color(Theme::list_line());
+        let mut row = div().relative().h(px(COLS_H)).flex_none().flex().items_center().px(px(ROW_X)).text_size(px(theme::UI_SMALL)).text_color(Theme::list_header());
+        row = row.group("cols");
         let header_bounds = self.header_bounds.clone();
         row = row.child(canvas(move |b, _, _| header_bounds.set(b), |_, _, _, _| {}).absolute().size_full());
         for (i, (key, label, w, right)) in cols.into_iter().enumerate() {
@@ -814,16 +982,17 @@ impl PaneView {
             let sorted = self.state.sort == key;
             let arrow = if self.state.ascending { "arrow-up-narrow-wide" } else { "arrow-down-narrow-wide" };
             row = row.child(
-                div().id(("col", i)).relative().flex_none().w(px(w)).h_full().px(px(CELL_PAD)).flex().items_center().gap(px(4.)).cursor_pointer()
+                div().id(("col", i)).relative().flex_none().w(px(w)).h(px(24.)).px(px(CELL_PAD)).rounded(px(6.)).flex().items_center().gap(px(4.)).cursor_pointer()
                     .when(right, |d| d.justify_end())
-                    .hover(|s| s.bg(Theme::row_hover()).text_color(Theme::text()))
+                    .when(i == 0, |d| d.pl(px(CELL_PAD + 2.)))
+                    .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
                     .when(sorted, |d| d.text_color(Theme::text_caption()))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.to_string()))
                     .when(sorted, |d| d.child(icon(arrow, 12., Theme::text_caption())))
                     .on_click(cx.listener(move |this, _, _, cx| this.sort_by(key, cx)))
                     .child(
                         div().id(("col-resize", i)).absolute().right(px(-4.)).top_0().h_full().w(px(8.)).flex().justify_center().cursor(CursorStyle::ResizeColumn)
-                            .child(div().w(px(1.)).h(px(12.)).mt(px(7.)).bg(Theme::list_line()))
+                            .child(div().w(px(1.)).h(px(12.)).mt(px(6.)).invisible().group_hover("cols", |s| s.visible()).bg(Theme::line_border()))
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_drag(ColResize { pane: id, col: i }, |d, _, _, cx| cx.new(|_| d.clone())),
@@ -846,8 +1015,8 @@ impl PaneView {
             Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
             None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
         };
-        let name_cell = div().flex_none().w(px(widths[0])).h_full().px(px(CELL_PAD - 2.)).flex().items_center().gap(px(7.)).child(glyph).map(|d| match renaming {
-            Some(rn) => d.child(div().flex_1().min_w_0().h(px(20.)).px(px(3.)).rounded(px(3.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone())),
+        let name_cell = div().flex_none().w(px(widths[0])).h_full().pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)).child(glyph).map(|d| match renaming {
+            Some(rn) => d.child(div().flex_1().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone())),
             None => d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(if e.hidden { Theme::text_caption() } else { Theme::text() }).child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary()))),
         });
         let cell = |w: f32, text: String, right: bool| div().flex_none().w(px(w)).px(px(CELL_PAD)).overflow_hidden().whitespace_nowrap().text_ellipsis().when(right, |d| d.flex().justify_end()).child(ui_text(text));
@@ -860,14 +1029,13 @@ impl PaneView {
         div()
             .id(("row", r))
             .h(px(ROW_H))
-            .mx(px(4.))
-            .px(px(2.))
-            .rounded(px(4.))
+            .mx(px(ROW_X))
+            .rounded(px(ROW_R))
             .flex()
             .items_center()
             .text_color(Theme::text_caption())
-            .map(|d| if selected { d.bg(if focused { Theme::row_selected() } else { Theme::row_selected_inactive() }) } else { d.hover(|s| s.bg(Theme::row_hover())) })
-            .when(cursor && !selected, |d| d.border_1().border_color(Theme::field_ring()))
+            .map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
+            .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
             .child(name_cell)
             .when(widths[1] > 0., |d| d.child(cell(widths[1], short_date(format::date(e.modified, offset), widths[1]), false)))
             .when(widths[2] > 0., |d| d.child(cell(widths[2], format::type_name(e, lang), false)))
@@ -953,10 +1121,8 @@ impl Render for PaneView {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .group("pane")
             .bg(Theme::bg_body())
-            .rounded(px(8.))
-            .border_1()
-            .border_color(if self.active { Theme::split_active() } else { Theme::line_border() })
             .font_family(theme::UI_FONT)
             .text_size(px(theme::UI_SIZE))
             .text_color(Theme::text())
@@ -999,6 +1165,8 @@ impl Render for PaneView {
                 this.state.clear_selection();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_paths(cx)))
+            .on_action(cx.listener(|this, _: &Properties, window, cx| this.run_cmd(Cmd::Properties, None, Point::default(), window, cx)))
             .on_action(cx.listener(|this, _: &ContextMenu, window, cx| {
                 let b = this.list_bounds.get();
                 let r = this.state.cursor.filter(|&r| this.state.is_selected(r));
@@ -1021,10 +1189,49 @@ impl Render for PaneView {
                 cx.notify();
             }))
             .child(self.render_header(cx))
-            .child(self.render_crumbs(cx))
             .children(self.render_filter(cx))
             .child(self.render_columns(widths, cx))
             .child(body)
-            .children(self.render_menu(cx))
+            .children(self.menu.as_ref().map(|(m, _)| deferred(anchored().position(point(px(0.), px(0.))).child(m.clone())).with_priority(5)))
+    }
+}
+
+/// What opening a file amounts to once a shortcut is resolved.
+#[derive(Debug, PartialEq)]
+enum OpenPlan {
+    /// Show this folder in the pane.
+    Enter(PathBuf),
+    /// Hand this path to the system (a shortcut itself, so Windows applies its arguments).
+    System(PathBuf),
+    /// A shortcut whose target is gone.
+    Missing(PathBuf),
+    Failed(String),
+}
+
+fn open_plan(path: &Path, link: Option<std::io::Result<grids_shell::LinkTarget>>, enter: bool) -> OpenPlan {
+    use grids_shell::LinkTarget;
+    match link {
+        Some(Ok(LinkTarget::Folder(dir))) if enter => OpenPlan::Enter(dir),
+        Some(Ok(LinkTarget::Missing(t))) => OpenPlan::Missing(t),
+        _ => OpenPlan::System(path.to_path_buf()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenPlan, open_plan};
+    use grids_shell::LinkTarget;
+    use std::path::Path;
+
+    #[test]
+    fn shortcut_plans() {
+        let lnk = Path::new("a.lnk");
+        assert_eq!(open_plan(lnk, Some(Ok(LinkTarget::Folder("d".into()))), true), OpenPlan::Enter("d".into()));
+        assert_eq!(open_plan(lnk, Some(Ok(LinkTarget::Folder("d".into()))), false), OpenPlan::System(lnk.into()));
+        assert_eq!(open_plan(lnk, Some(Ok(LinkTarget::File("f".into()))), true), OpenPlan::System(lnk.into()));
+        assert_eq!(open_plan(lnk, Some(Ok(LinkTarget::Missing("m".into()))), true), OpenPlan::Missing("m".into()));
+        assert_eq!(open_plan(lnk, Some(Ok(LinkTarget::Other)), true), OpenPlan::System(lnk.into()));
+        assert_eq!(open_plan(lnk, Some(Err(std::io::Error::other("bad"))), true), OpenPlan::System(lnk.into()));
+        assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }

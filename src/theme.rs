@@ -2,7 +2,7 @@
 //! (MIT, see THIRD_PARTY.md): the same light look with a mirrored dark mode,
 //! a sunken sidebar on the window surface and white content planes.
 
-use gpui::{BoxShadow, Hsla, Rgba, point, px, rgb};
+use gpui::{BoxShadow, Hsla, Rgba, WindowBackgroundAppearance, point, px, rgb};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---- dark mode
@@ -12,6 +12,38 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // mirrors lightness: the white page turns dark gray, near-black text
 // near-white, while vivid colours (the accent) keep their hue.
 // `rgbaf` stays literal for shadows and scrims.
+
+// ---- window glass (as quiet-md)
+
+/// Whether the window sits on blurred glass (acrylic). Windows 10 and 11
+/// 21H2 drag acrylic windows with a lag, so there it stays opaque; Linux
+/// compositors vary, so it is opaque there too.
+pub fn glass() -> bool {
+    #[cfg(target_os = "windows")] {
+        static GLASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *GLASS.get_or_init(|| std::env::var_os("GRIDS_OPAQUE").is_none() && windows_build().is_some_and(|b| b >= 22621))
+    }
+    #[cfg(target_os = "linux")] { false }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))] { true }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_build() -> Option<u32> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::w;
+    let mut buf = [0u16; 32];
+    let mut len = (buf.len() * 2) as u32;
+    let r = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"), w!("CurrentBuildNumber"), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut len)) };
+    if r != ERROR_SUCCESS { return None }
+    let n = (len as usize / 2).min(buf.len());
+    String::from_utf16_lossy(&buf[..n]).trim_end_matches('\0').trim().parse().ok()
+}
+
+/// Blurred where `glass`, else opaque.
+pub fn window_background() -> WindowBackgroundAppearance {
+    if glass() { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque }
+}
 
 static DARK: AtomicBool = AtomicBool::new(false);
 thread_local! {
@@ -234,13 +266,14 @@ impl Theme {
     pub fn row_selected() -> Hsla { ca(craft::B500, 0.14) }
     /// Selected rows in a pane without focus.
     pub fn row_selected_inactive() -> Hsla { ca(craft::N1000, 0.07) }
-    pub fn row_hover() -> Hsla { ca(craft::N1000, 0.035) }
     /// Text selection in fields.
     pub fn selection() -> Hsla { ca(craft::B500, 0.24) }
     pub fn caret() -> Hsla { c(craft::B500) }
     pub fn star() -> Hsla { c(0xf5a524) }
     /// The window surface: the sidebar material behind the content.
-    pub fn window() -> Hsla { ca(craft::WINDOW, 1.) }
+    pub fn window() -> Hsla { ca(craft::WINDOW, if glass() { 0.84 } else { 1. }) }
+    /// Sidebar section titles.
+    pub fn sidebar_section() -> Hsla { c(0x333739) }
     pub fn sidebar_text() -> Hsla { ca(craft::N900, 0.85) }
     pub fn sidebar_hover() -> Hsla { ca(craft::N1000, 0.045) }
     pub fn sidebar_selected() -> Hsla { ca(craft::N1000, 0.072) }
@@ -251,12 +284,7 @@ impl Theme {
     pub fn popover_bg() -> Hsla { c(0xfafafa) }
     /// Column headers of lists: tertiary text (#88898B measured in quiet-md).
     pub fn list_header() -> Hsla { c(0x88898b) }
-    /// Hairline under a list header.
-    pub fn list_line() -> Hsla { ca(craft::N1000, 0.045) }
-    /// Field fill (address bar at rest).
-    pub fn field() -> Hsla { ca(craft::N1000, 0.04) }
     pub fn field_edge() -> Hsla { ca(craft::B500, 0.6) }
-    pub fn field_ring() -> Hsla { ca(craft::B500, 0.16) }
     pub fn split_active() -> Hsla { ca(craft::B500, 0.5) }
     pub fn drop_target() -> Hsla { ca(craft::B500, 0.10) }
 }

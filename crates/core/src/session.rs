@@ -22,7 +22,7 @@ pub struct Columns {
 }
 
 impl Default for Columns {
-    fn default() -> Self { Self { name: 240., modified: 132., kind: 108., size: 84. } }
+    fn default() -> Self { Self { name: 240., modified: 132., kind: 132., size: 84. } }
 }
 
 impl Columns {

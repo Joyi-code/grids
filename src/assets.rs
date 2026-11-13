@@ -16,7 +16,8 @@ static FILES: &[(&str, &[u8])] = icons![
     "file-spreadsheet", "file-text", "file-video", "filter", "folder", "folder-fill", "folder-open", "folder-plus", "hard-drive",
     "house", "image", "layers", "layout-grid", "maximize-2", "minimize-2", "minus", "monitor", "moon", "panel-left",
     "panel-left-close", "pencil", "plus", "presentation", "refresh-cw", "save", "scissors", "search", "square", "star",
-    "star-fill", "sun", "sun-moon", "trash-2", "x",
+    "star-fill", "sun", "sun-moon", "trash-2", "x", "star-off", "folder-search", "square-split-horizontal", "link", "info",
+    "terminal",
 ];
 
 pub struct Assets;

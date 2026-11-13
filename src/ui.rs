@@ -28,32 +28,6 @@ pub fn popover() -> Div {
 /// Menus and popovers round at 12 (the native menu panel); their
 /// rows at 6, 5pt in from the edge.
 pub const MENU_RADIUS: f32 = 12.;
-pub const ROW_RADIUS: f32 = 6.;
-
-/// A menu row: 32 tall, 13pt label, 16pt glyph; hovering lays the quiet
-/// fill the editor's menus use, and text and glyph keep their colours.
-pub const MENU_ROW_H: f32 = 32.;
-/// How far a menu row sits in from the menu's sides.
-pub const MENU_INSET: f32 = 5.;
-
-pub fn menu_row(id: impl Into<ElementId>, group: SharedString) -> Stateful<Div> {
-    div()
-        .id(id)
-        .group(group)
-        .flex_none()
-        .h(px(MENU_ROW_H))
-        .mx(px(MENU_INSET))
-        .px(px(8.))
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .rounded(px(ROW_RADIUS))
-        .cursor_pointer()
-        .text_size(px(13.))
-        .line_height(px(20.))
-        .text_color(Theme::text())
-        .hover(|s| s.bg(Theme::fill_hover()))
-}
 
 /// Tooltip bubble: the dark rounded tip (12pt white on near-black, radius 7, arrow).
 pub struct Tooltip {
@@ -423,7 +397,7 @@ impl Element for UiText {
 
 
 /// Title bar height and its buttons.
-pub const HEADER_H: f32 = 44.;
+pub const HEADER_H: f32 = 48.;
 pub const HEADER_BTN: f32 = 30.;
 
 /// Minimise / maximise / close at the right of the title bar (Windows and
@@ -454,9 +428,8 @@ pub fn window_controls(window: &Window, en: bool) -> Option<Div> {
         .child(button("window-close", WindowControlArea::Close, tr("关闭", "Close")).child(icon("x", 17., Theme::icon()))))
 }
 
-/// A square icon button (title bar, pane headers).
-pub fn icon_button(id: impl Into<ElementId>, name: &'static str, size: f32, glyph: f32, enabled: bool) -> Stateful<Div> {
-    div().id(id).size(px(size)).rounded(px(6.)).flex_none().flex().items_center().justify_center()
-        .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))
-        .child(icon(name, glyph, if enabled { Theme::icon() } else { Theme::text_disabled() }))
+/// A borderless icon button (quiet-md's header icons): radius 8, hover fill.
+pub fn header_icon(id: impl Into<ElementId>, name: &'static str, size: f32, glyph: f32) -> Stateful<Div> {
+    div().id(id).no_drag().size(px(size)).rounded(px(8.)).flex_none().flex().items_center().justify_center().cursor_pointer()
+        .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())).child(icon(name, glyph, Theme::icon()))
 }

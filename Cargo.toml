@@ -29,7 +29,7 @@ notify = { version = "8", default-features = false }
 futures = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry"] }
 
 [build-dependencies]
 
@@ -56,4 +56,6 @@ workspace = true
 opt-level = 3
 lto = "thin"
 codegen-units = 4
-strip = true
+# line tables (in grids.pdb on Windows) so grids-crash.log backtraces name functions and lines
+debug = "line-tables-only"
+strip = "none"

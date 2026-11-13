@@ -5,7 +5,7 @@ use crate::input::{InputEvent, TextInput};
 use crate::pane::{PaneEvent, PaneView};
 use crate::state::{self, Shared, tr};
 use crate::theme::{self, Theme};
-use crate::ui::{HEADER_H, TipExt, TitleBarExt, icon, icon_button, popover, ui_text, window_controls};
+use crate::ui::{HEADER_H, TipExt, TitleBarExt, header_icon, icon, popover, ui_text, window_controls};
 use gpui::{prelude::FluentBuilder, *};
 use grids_core::format;
 use grids_core::layout::Layout;
@@ -41,8 +41,19 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-const GAP: f32 = 6.;
-const STATUS_H: f32 = 26.;
+/// Splitter grab area either side of the 1px hairline.
+const GRAB: f32 = 4.;
+const STATUS_H: f32 = 28.;
+const SIDEBAR_MIN: f32 = 180.;
+const SIDEBAR_MAX: f32 = 420.;
+/// quiet-md's sidebar geometry: pills inset 14 from the edge, 30 high with
+/// radius 9 on a 31 pitch, 18pt glyphs in a 20 box, 9 before the label;
+/// section headers 34 (6 above a 28 label), groups 16 apart.
+const SB_X: f32 = 14.;
+const SB_ROW: f32 = 30.;
+const SB_R: f32 = 9.;
+const SB_ICON: f32 = 18.;
+const SB_SECTION: f32 = 34.;
 const PRESETS: [usize; 7] = [1, 2, 4, 6, 9, 12, 16];
 
 /// A grid splitter being dragged: column (`vertical`) or row divider `i`.
@@ -111,6 +122,8 @@ impl Workspace {
         me.set_active(me.active, window, cx);
         me._subs.push(cx.observe_window_appearance(window, |this, window, cx| { this.apply_theme(window, cx) }));
         me.apply_theme(window, cx);
+        // Read the "New" templates now so the first right-click has them.
+        let _ = state::new_items(cx);
         // Drives come and go (USB sticks): look again every few seconds.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(4)).await;
@@ -122,7 +135,7 @@ impl Workspace {
 
     fn make_pane(&mut self, i: usize, save: &PaneSave, window: &mut Window, cx: &mut Context<Self>) -> Entity<PaneView> {
         let pane = cx.new(|cx| PaneView::new(i, save, window, cx));
-        let sub = cx.subscribe_in(&pane, window, |this, pane, ev: &PaneEvent, _, cx| match ev {
+        let sub = cx.subscribe_in(&pane, window, |this, pane, ev: &PaneEvent, window, cx| match ev {
             PaneEvent::Activated => {
                 if let Some(i) = this.panes.iter().position(|p| p == pane) && i != this.active { this.set_active_only(i, cx) }
             }
@@ -131,6 +144,14 @@ impl Workspace {
                 for p in this.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(dirs, cx)) }
             }
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
+            PaneEvent::OpenInNext(path) => {
+                let n = this.panes.len();
+                let Some(i) = this.panes.iter().position(|p| p == pane) else { return };
+                if n < 2 { pane.update(cx, |p, cx| p.navigate(path.clone(), cx)); return }
+                let j = (i + 1) % n;
+                this.panes[j].clone().update(cx, |p, cx| p.navigate(path.clone(), cx));
+                this.set_active(j, window, cx);
+            }
         });
         let _ = window;
         self._subs.push(sub);
@@ -281,61 +302,78 @@ impl Workspace {
 
     // ---- rendering
 
-    fn render_title(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The top of the white plane, as quiet-md's Home: the title (session
+    /// name), a filter field for the active pane in the middle, and icon
+    /// buttons at the top right before the window controls.
+    fn render_topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let en = state::en(cx);
         let cfg = &state::shared(cx).config;
         let sidebar_open = cfg.sidebar_open;
-        let session = cfg.session_name.clone();
+        let title = cfg.session_name.clone().unwrap_or_else(|| "Grids".into());
         let appearance = cfg.appearance;
         let l = &self.layout;
-        let layout_label = format!("{} × {}", l.rows, l.cols);
         let theme_icon = match appearance { Appearance::System => "sun-moon", Appearance::Light => "sun", Appearance::Dark => "moon" };
         let theme_tip = match appearance {
             Appearance::System => tr(cx, "外观：跟随系统", "Appearance: system"),
             Appearance::Light => tr(cx, "外观：浅色", "Appearance: light"),
             Appearance::Dark => tr(cx, "外观：深色", "Appearance: dark"),
         };
+        let controls = window_controls(window, en);
+        let has_controls = controls.is_some();
+        // The filter field, centred in the plane when there is room.
+        let plane_w = f32::from(window.viewport_size().width) - if sidebar_open { self.sidebar_w(cx) } else { 0. };
+        let search_w = (plane_w - 560.).min(360.);
+        let search = (search_w >= 160.).then(|| {
+            div().id("header-search").absolute().left(px((plane_w - search_w) / 2.)).top(px(8.))
+                .w(px(search_w)).h(px(32.)).no_drag().flex().items_center().gap(px(8.)).px(px(10.))
+                .rounded(px(9.)).bg(Theme::fill_hover())
+                .cursor_pointer().hover(|s| s.bg(Theme::fill_hover_strong()))
+                .child(icon("search", 15., Theme::icon()))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(13.)).text_color(Theme::text_caption()).child(if en { format!("Filter pane {}…", self.active + 1) } else { format!("筛选窗格 {}…", self.active + 1) }))
+                .when(search_w >= 220., |d| d.child(div().flex_none().text_size(px(11.)).text_color(Theme::text_placeholder()).child("Ctrl F")))
+                .tip(tr(cx, "按名称筛选当前窗格", "Filter the active pane by name"), Some("Ctrl+F"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(p) = this.active_pane().cloned() { p.update(cx, |p, cx| p.start_filter(window, cx)) }
+                }))
+        });
         div()
-            .id("title-bar")
+            .id("top-bar")
+            .relative()
             .h(px(HEADER_H))
             .flex_none()
             .flex()
             .items_center()
-            .pl(px(8.))
+            .pl(px(if sidebar_open { 22. } else { 12. }))
             .title_bar()
-            .child(
-                icon_button("toggle-sidebar", if sidebar_open { "panel-left-close" } else { "panel-left" }, 30., 18., true)
-                    .no_drag()
-                    .tip(if sidebar_open { tr(cx, "隐藏侧栏", "Hide sidebar") } else { tr(cx, "显示侧栏", "Show sidebar") }, Some("Ctrl+B"))
+            .when(!sidebar_open, |d| d.child(
+                header_icon("open-sidebar", "panel-left-open", 28., 17.).mr(px(10.))
+                    .tip(tr(cx, "显示侧栏", "Show sidebar"), Some("Ctrl+B"))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-            )
-            .child(
-                div().ml(px(8.)).flex().items_center().gap(px(8.)).min_w_0()
-                    .child(icon("layout-grid", 16., Theme::primary()))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).child("Grids"))
-                    .when_some(session, |d, s| d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(Theme::text_caption()).child(ui_text(s)))),
-            )
+            ))
+            .child(div().flex_none().max_w(px(260.)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(17.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child(ui_text(title)))
             .child(div().flex_1())
+            .children(search)
             .child(
-                div().id("layout-btn").relative().no_drag().h(px(30.)).px(px(10.)).rounded(px(8.)).flex().items_center().gap(px(6.)).cursor_pointer()
+                div().id("layout-btn").relative().no_drag().h(px(32.)).px(px(8.)).rounded(px(8.)).flex().flex_none().items_center().gap(px(6.)).cursor_pointer()
                     .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
                     .when(self.picker, |d| d.bg(Theme::fill_hover_strong()))
-                    .child(icon("layout-grid", 16., Theme::icon()))
-                    .child(div().whitespace_nowrap().child(format!("{} {layout_label}", tr(cx, "布局", "Layout"))))
-                    .child(icon("chevron-down", 14., Theme::icon_muted()))
+                    .child(icon("layout-grid", 18., Theme::icon()))
+                    .child(div().whitespace_nowrap().text_size(px(13.)).child(format!("{} × {}", l.rows, l.cols)))
                     .child({ let b = self.layout_btn.clone(); canvas(move |bounds, _, _| b.set(bounds), |_, _, _, _| {}).absolute().size_full() })
+                    .tip(tr(cx, "布局", "Layout"), Some("Ctrl+Shift+G"))
                     .on_click(cx.listener(|this, _, _, cx| { this.picker = !this.picker; this.picker_hover = None; cx.notify() })),
             )
             .child(
-                icon_button("maximize-pane", if self.maximized.is_some() { "minimize-2" } else { "maximize-2" }, 30., 16., true)
-                    .no_drag().ml(px(2.))
+                header_icon("maximize-pane", if self.maximized.is_some() { "minimize-2" } else { "maximize-2" }, 32., 17.).ml(px(2.))
                     .tip(if self.maximized.is_some() { tr(cx, "还原宫格", "Restore grid") } else { tr(cx, "最大化当前窗格", "Maximize pane") }, Some("Ctrl+Shift+M"))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx))),
             )
-            .child(icon_button("theme", theme_icon, 30., 16., true).no_drag().ml(px(2.)).tip(theme_tip, None).on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))))
-            .children(window_controls(window, en))
-            .when(window_controls(window, en).is_none(), |d| d.pr(px(8.)))
+            .child(header_icon("theme", theme_icon, 32., 17.).ml(px(2.)).tip(theme_tip, None).on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))))
+            .children(controls)
+            .when(!has_controls, |d| d.pr(px(8.)))
     }
+
+    fn sidebar_w(&self, cx: &App) -> f32 { state::shared(cx).config.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX) }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let c = &mut cx.global_mut::<Shared>().config;
@@ -422,16 +460,16 @@ impl Workspace {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let cfg = &state::shared(cx).config;
-        let width = cfg.sidebar_width.clamp(160., 360.);
+        let width = cfg.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         let current = self.active_pane().map(|p| p.read(cx).state.path.clone());
         let en = state::en(cx);
-        let section = |t: &'static str| div().h(px(28.)).px(px(10.)).pt(px(8.)).flex().items_center().text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(t);
+        let section = |t: &'static str| div().h(px(SB_SECTION)).pt(px(6.)).px(px(SB_X + 8.)).flex().items_center().text_size(px(theme::UI_SIZE)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(t);
         let item = |id: SharedString, glyph: &'static str, color: Hsla, label: String, path: &PathBuf| {
             let on = current.as_ref() == Some(path);
-            div().id(id).group("side-item").h(px(28.)).mx(px(6.)).px(px(8.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+            div().id(id).group("side-item").relative().h(px(SB_ROW)).mx(px(SB_X)).mb(px(1.)).pl(px(6.)).pr(px(4.)).rounded(px(SB_R)).flex().items_center().cursor_pointer()
                 .text_color(Theme::sidebar_text())
                 .map(|d| if on { d.bg(Theme::sidebar_selected()) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
-                .child(icon(glyph, 16., color))
+                .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(icon(glyph, SB_ICON, color)))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(label)))
         };
         let mut col = div().id("sidebar-scroll").flex().flex_col().pb(px(10.)).overflow_y_scroll().flex_1().min_h_0();
@@ -446,23 +484,23 @@ impl Workspace {
                 KnownFolderKind::Pictures => ("image", tr(cx, "图片", "Pictures")),
             };
             let p = k.path.clone();
-            col = col.child(item(format!("known-{i}").into(), glyph, Theme::primary(), label.into(), &k.path).on_click(cx.listener(move |this, _, window, cx| this.go_to(p.clone(), window, cx))));
+            col = col.child(item(format!("known-{i}").into(), glyph, Theme::icon(), label.into(), &k.path).on_click(cx.listener(move |this, _, window, cx| this.go_to(p.clone(), window, cx))));
         }
 
-        col = col.child(section(tr(cx, "收藏夹", "Favourites")));
+        col = col.child(div().h(px(16. - 6.))).child(section(tr(cx, "收藏夹", "Favourites")));
         if cfg.favourites.is_empty() {
-            col = col.child(div().mx(px(6.)).px(px(8.)).py(px(4.)).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "点击窗格标题栏的星标收藏文件夹", "Star a pane's folder to add it here")));
+            col = col.child(div().mx(px(SB_X)).px(px(8.)).py(px(4.)).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "点击窗格标题栏的星标收藏文件夹", "Star a pane's folder to add it here")));
         }
         for (i, f) in cfg.favourites.iter().enumerate() {
             let p = f.clone();
             let rm = f.clone();
             col = col.child(
-                item(format!("fav-{i}").into(), "star-fill", Theme::star(), grids_core::paths::display_name(f), f)
+                item(format!("fav-{i}").into(), "folder", Theme::icon(), grids_core::paths::display_name(f), f)
                     .tip(&f.to_string_lossy(), None)
                     .on_click(cx.listener(move |this, _, window, cx| this.go_to(p.clone(), window, cx)))
                     .child(
-                        div().id(("fav-x", i)).invisible().group_hover("side-item", |s| s.visible()).size(px(18.)).rounded(px(4.)).flex().items_center().justify_center().hover(|s| s.bg(Theme::fill_hover_strong()))
-                            .child(icon("x", 12., Theme::icon_muted()))
+                        div().id(("fav-x", i)).invisible().group_hover("side-item", |s| s.visible()).size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().hover(|s| s.bg(Theme::fill_hover_strong()))
+                            .child(icon("x", 14., Theme::icon()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 cx.global_mut::<Shared>().config.toggle_favourite(&rm);
@@ -474,7 +512,7 @@ impl Workspace {
             );
         }
 
-        col = col.child(section(tr(cx, "此电脑", "This PC")));
+        col = col.child(div().h(px(16. - 6.))).child(section(tr(cx, "此电脑", "This PC")));
         for (i, d) in self.drives.iter().enumerate() {
             let p = d.path.clone();
             let root = d.path.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
@@ -483,15 +521,15 @@ impl Workspace {
         }
 
         col = col.child(
-            div().flex().items_center().pr(px(8.))
+            div().mt(px(16. - 6.)).flex().items_center().pr(px(SB_X + 4.))
                 .child(div().flex_1().child(section(tr(cx, "会话", "Sessions"))))
-                .child(icon_button("save-session", "plus", 22., 14., true).mt(px(8.)).tip(tr(cx, "保存当前会话", "Save current session"), None).on_click(cx.listener(|this, _, window, cx| this.start_save_session(window, cx)))),
+                .child(header_icon("save-session", "plus", 22., 16.).rounded(px(6.)).mt(px(6.)).tip(tr(cx, "保存当前会话", "Save current session"), None).on_click(cx.listener(|this, _, window, cx| this.start_save_session(window, cx)))),
         );
         if let Some((input, _)) = &self.session_input {
-            col = col.child(div().mx(px(6.)).h(px(28.)).px(px(8.)).rounded(px(6.)).flex().items_center().bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).child(div().flex_1().min_w_0().child(input.clone())));
+            col = col.child(div().mx(px(SB_X)).h(px(SB_ROW)).px(px(8.)).rounded(px(SB_R)).flex().items_center().bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).child(div().flex_1().min_w_0().child(input.clone())));
         }
         if cfg.sessions.is_empty() && self.session_input.is_none() {
-            col = col.child(div().mx(px(6.)).px(px(8.)).py(px(4.)).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "点 + 把当前布局和路径存为会话", "Click + to save the layout and folders")));
+            col = col.child(div().mx(px(SB_X)).px(px(8.)).py(px(4.)).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "点 + 把当前布局和路径存为会话", "Click + to save the layout and folders")));
         }
         let current_name = cfg.session_name.clone();
         for (i, s) in cfg.sessions.iter().enumerate() {
@@ -501,10 +539,10 @@ impl Workspace {
             let on = current_name.as_deref() == Some(&s.name);
             let n = s.session.layout.count();
             col = col.child(
-                div().id(("session", i)).group("side-item").h(px(28.)).mx(px(6.)).px(px(8.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+                div().id(("session", i)).group("side-item").h(px(SB_ROW)).mx(px(SB_X)).mb(px(1.)).pl(px(6.)).pr(px(8.)).rounded(px(SB_R)).flex().items_center().cursor_pointer()
                     .text_color(Theme::sidebar_text())
                     .map(|d| if on { d.bg(Theme::sidebar_selected()) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
-                    .child(icon("layers", 16., Theme::icon()))
+                    .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(icon("layers", SB_ICON, Theme::icon())))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(name.clone())))
                     .child(div().group_hover("side-item", |s| s.invisible()).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(if en { format!("{n}") } else { format!("{n} 格") }))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -513,8 +551,8 @@ impl Workspace {
                         this.schedule_save(cx);
                     }))
                     .child(
-                        div().id(("session-x", i)).absolute().right(px(6.)).invisible().group_hover("side-item", |s| s.visible()).size(px(18.)).rounded(px(4.)).flex().items_center().justify_center().hover(|s| s.bg(Theme::fill_hover_strong()))
-                            .child(icon("x", 12., Theme::icon_muted()))
+                        div().id(("session-x", i)).absolute().right(px(4.)).invisible().group_hover("side-item", |s| s.visible()).size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().hover(|s| s.bg(Theme::fill_hover_strong()))
+                            .child(icon("x", 14., Theme::icon()))
                             .tip(tr(cx, "删除会话", "Delete session"), None)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -535,6 +573,12 @@ impl Workspace {
             .flex()
             .flex_col()
             .text_size(px(theme::UI_SIZE))
+            .child(
+                // The sidebar's own header row: the toggle, level with the plane's title.
+                div().h(px(HEADER_H)).flex_none().flex().items_center().pl(px(16.)).title_bar()
+                    .child(header_icon("toggle-sidebar", "panel-left-close", 28., 17.).tip(tr(cx, "隐藏侧栏", "Hide sidebar"), Some("Ctrl+B")).on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))))
+                    .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(icon("layout-grid", 16., Theme::icon())).child(div().font_weight(FontWeight::SEMIBOLD).child("Grids"))),
+            )
             .child(col)
             .child(
                 div().id("sidebar-resize").absolute().right(px(-3.)).top_0().h_full().w(px(6.)).cursor(CursorStyle::ResizeColumn)
@@ -542,6 +586,8 @@ impl Workspace {
             )
     }
 
+    /// The panes edge to edge on the white plane, 1px hairlines between them;
+    /// the splitters' grab areas lie over the hairlines, drawn after the panes.
     fn render_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.grid_bounds.clone();
         let mut grid = div().relative().flex_1().min_w_0().min_h_0().flex().flex_col()
@@ -550,30 +596,38 @@ impl Workspace {
             return grid.child(div().flex_1().min_h_0().child(m.clone()));
         }
         let l = &self.layout;
+        let line = || div().flex_none().bg(Theme::line_divider());
         for r in 0..l.rows {
             let mut row = div().flex().min_h_0().flex_basis(px(0.)).map(|mut d| { d.style().flex_grow = Some(l.row_weights[r]); d });
             for c in 0..l.cols {
                 let i = l.index(r, c);
                 let Some(p) = self.panes.get(i) else { continue };
                 row = row.child(div().min_w_0().min_h_0().flex_basis(px(0.)).map(|mut d| { d.style().flex_grow = Some(l.col_weights[c]); d }).child(p.clone()));
-                if c + 1 < l.cols { row = row.child(self.splitter(true, c, cx)) }
+                if c + 1 < l.cols { row = row.child(line().w(px(1.)).h_full()) }
             }
             grid = grid.child(row);
-            if r + 1 < l.rows { grid = grid.child(self.splitter(false, r, cx)) }
+            if r + 1 < l.rows { grid = grid.child(line().h(px(1.)).w_full()) }
+        }
+        let b = self.grid_bounds.get();
+        let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+        if w > 1. {
+            for i in 0..l.cols.saturating_sub(1) { grid = grid.child(self.splitter(true, i, l.col_split(i) * w, cx)) }
+            for i in 0..l.rows.saturating_sub(1) { grid = grid.child(self.splitter(false, i, l.row_split(i) * h, cx)) }
         }
         grid
     }
 
-    fn splitter(&self, vertical: bool, i: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The grab area over hairline `i` at `at` px from the grid's left / top.
+    fn splitter(&self, vertical: bool, i: usize, at: f32, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id(SharedString::from(format!("split-{}-{i}-{}", if vertical { "v" } else { "h" }, cx.entity_id())))
-            .flex_none()
-            .map(|d| if vertical { d.w(px(GAP)).h_full().cursor(CursorStyle::ResizeColumn) } else { d.h(px(GAP)).w_full().cursor(CursorStyle::ResizeRow) })
+            .id(SharedString::from(format!("split-{}-{i}", if vertical { "v" } else { "h" })))
+            .absolute()
+            .map(|d| if vertical { d.top_0().bottom_0().left(px(at - GRAB)).w(px(GRAB * 2. + 1.)).cursor(CursorStyle::ResizeColumn) } else { d.left_0().right_0().top(px(at - GRAB)).h(px(GRAB * 2. + 1.)).cursor(CursorStyle::ResizeRow) })
             .flex()
-            .items_center()
             .justify_center()
+            .items_center()
             .group("splitter")
-            .child(div().map(|d| if vertical { d.w(px(2.)).h(px(28.)) } else { d.h(px(2.)).w(px(28.)) }).rounded(px(1.)).invisible().group_hover("splitter", |s| s.visible()).bg(Theme::split_active()))
+            .child(div().map(|d| if vertical { d.w(px(1.)).h_full() } else { d.h(px(1.)).w_full() }).invisible().group_hover("splitter", |s| s.visible()).bg(Theme::split_active()))
             .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                 if ev.click_count() >= 2 {
                     if vertical { this.layout.equalize_cols() } else { this.layout.equalize_rows() }
@@ -606,7 +660,10 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(12.))
-            .px(px(12.))
+            .pl(px(22.))
+            .pr(px(16.))
+            .border_t_1()
+            .border_color(Theme::line_divider())
             .text_size(px(theme::UI_SMALL))
             .text_color(Theme::text_caption())
             .child(div().flex_none().whitespace_nowrap().child(pane_no))
@@ -626,7 +683,6 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .flex_col()
             .bg(Theme::window())
             .font_family(theme::UI_FONT)
             .text_size(px(theme::UI_SIZE))
@@ -667,17 +723,18 @@ impl Render for Workspace {
             }))
             .on_drag_move::<SidebarDrag>(cx.listener(|this, ev: &DragMoveEvent<SidebarDrag>, _, cx| {
                 let x = f32::from(ev.event.position.x);
-                cx.global_mut::<Shared>().config.sidebar_width = x.clamp(160., 360.);
+                cx.global_mut::<Shared>().config.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
                 this.schedule_save(cx);
                 cx.notify();
             }))
-            .child(self.render_title(window, cx))
+            .when(sidebar_open, |d| d.child(self.render_sidebar(cx)))
             .child(
-                div().flex_1().min_h_0().flex().px(px(GAP)).when(sidebar_open, |d| d.pl(px(0.)))
-                    .when(sidebar_open, |d| d.child(self.render_sidebar(cx)))
-                    .child(self.render_grid(cx)),
+                // The white plane, flush with the window's top, right and bottom.
+                div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body())
+                    .child(self.render_topbar(window, cx))
+                    .child(self.render_grid(cx))
+                    .child(self.render_status(cx)),
             )
-            .child(self.render_status(cx))
             .children(self.render_picker(cx))
     }
 }
