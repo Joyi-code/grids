@@ -201,13 +201,25 @@ pub struct OpItem {
 /// freedesktop trash (`~/.local/share/Trash`) or `~/.Trash` on macOS.
 /// `Err(Interrupted)` when the user cancelled.
 pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
-    recycle_tracked(paths).map(drop)
+    recycle_tracked(paths, false).map(drop)
 }
 
 /// Deletes permanently (Windows asks for confirmation as Explorer's
 /// Shift+Del does). `Err(Interrupted)` when the user cancelled.
 pub fn delete(paths: &[PathBuf]) -> io::Result<()> {
-    delete_tracked(paths).map(drop)
+    delete_tracked(paths, false).map(drop)
+}
+
+/// [`recycle`] after Grids' own confirmation: FOF_NOCONFIRMATION and no nuke
+/// warning (word the confirmation with [`recycle_would_nuke`]). Progress and
+/// conflict UI stay native.
+pub fn recycle_confirmed(paths: &[PathBuf]) -> io::Result<()> {
+    recycle_tracked(paths, true).map(drop)
+}
+
+/// [`delete`] after Grids' own confirmation (FOF_NOCONFIRMATION).
+pub fn delete_confirmed(paths: &[PathBuf]) -> io::Result<()> {
+    delete_tracked(paths, true).map(drop)
 }
 
 /// Copies `paths` into the folder `dest` (system progress dialog on Windows).
@@ -227,20 +239,33 @@ pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
 /// [`recycle`], returning what was recycled. When the user cancels part-way
 /// the items already done are returned as `Ok`; `Err(Interrupted)` only when
 /// nothing was done.
-pub fn recycle_tracked(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+///
+/// `confirmed`: Grids already asked (its own dialog, worded by
+/// [`recycle_would_nuke`]), so the shell adds FOF_NOCONFIRMATION and no
+/// "delete permanently?" nuke warning. Progress and conflict UI remain.
+pub fn recycle_tracked(paths: &[PathBuf], confirmed: bool) -> io::Result<Vec<OpItem>> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    imp::recycle(paths)
+    imp::recycle(paths, confirmed)
 }
 
 /// [`delete`], returning what was deleted (`dst` is `None`). Partial
-/// cancellation as in [`recycle_tracked`].
-pub fn delete_tracked(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+/// cancellation and `confirmed` as in [`recycle_tracked`].
+pub fn delete_tracked(paths: &[PathBuf], confirmed: bool) -> io::Result<Vec<OpItem>> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    imp::delete(paths)
+    imp::delete(paths, confirmed)
+}
+
+/// Best effort, cheap enough for the UI thread on local drives (network
+/// drives answer `true` without being queried): whether recycling `paths`
+/// would delete them permanently because their drive has no Recycle Bin.
+/// Use it to word Grids' confirmation; files too big for the bin are not
+/// detected. Always `false` off Windows (the trash fails instead).
+pub fn recycle_would_nuke(paths: &[PathBuf]) -> bool {
+    !paths.is_empty() && imp::recycle_would_nuke(paths)
 }
 
 /// [`copy`], returning each copy's real path (automatic "副本" names

@@ -64,20 +64,20 @@ use windows::Win32::UI::Shell::{
     ASSOCSTR_EXECUTABLE, ASSOCSTR_FRIENDLYDOCNAME, AssocQueryStringW, BHID_DataObject,
     BHID_SFUIObject, CFSTR_PREFERREDDROPEFFECT, CMF_CANRENAME, CMF_EXTENDEDVERBS, CMF_NORMAL,
     CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES, DragQueryFileW,
-    FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
-    FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE, FOLDERID_CommonTemplates,
-    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile,
-    FOLDERID_Templates, FileOperation, GCS_VERBW, HDROP, IAssocHandler, IContextMenu,
-    IContextMenu2, IContextMenu3, IFileOperation, ILFree, IShellFolder, IShellItem,
-    IShellItemArray, IShellLinkW, KF_FLAG_DEFAULT, OAIF_ALLOW_REGISTRATION, OAIF_EXEC,
-    OAIF_REGISTER_EXT, OPENASINFO, SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC,
-    SHAssocEnumHandlers, SHCNE_CREATE, SHCNF_PATHW, SHChangeNotify, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromIDLists, SHDefExtractIconW, SHELLEXECUTEINFOW, SHFILEINFOW,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetDesktopFolder, SHGetFileInfoW,
-    SHGetImageList, SHGetKnownFolderPath, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL,
-    SHLoadIndirectString, SHMultiFileProperties, SHOP_FILEPATH, SHObjectProperties,
-    SHOpenFolderAndSelectItems, SHOpenWithDialog, SHParseDisplayName, SLGP_RAWPATH,
-    ShellExecuteExW, ShellLink,
+    FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR,
+    FOF_RENAMEONCOLLISION, FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE,
+    FOLDERID_CommonTemplates, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
+    FOLDERID_Pictures, FOLDERID_Profile, FOLDERID_Templates, FileOperation, GCS_VERBW, HDROP,
+    IAssocHandler, IContextMenu, IContextMenu2, IContextMenu3, IFileOperation, ILFree,
+    IShellFolder, IShellItem, IShellItemArray, IShellLinkW, KF_FLAG_DEFAULT,
+    OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OAIF_REGISTER_EXT, OPENASINFO, SEE_MASK_FLAG_NO_UI,
+    SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SHAssocEnumHandlers, SHCNE_CREATE, SHCNF_PATHW,
+    SHChangeNotify, SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists,
+    SHDefExtractIconW, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+    SHGetDesktopFolder, SHGetFileInfoW, SHGetImageList, SHGetKnownFolderPath, SHIL_EXTRALARGE,
+    SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL, SHLoadIndirectString, SHMultiFileProperties, SHOP_FILEPATH,
+    SHObjectProperties, SHOpenFolderAndSelectItems, SHOpenWithDialog, SHParseDisplayName,
+    SHQUERYRBINFO, SHQueryRecycleBinW, SLGP_RAWPATH, ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_RecycleBinFolder, IEnumShellItems, IFileOperationProgressSink,
@@ -987,12 +987,64 @@ fn file_op(
     Ok(items)
 }
 
-pub fn recycle(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
-    recycle_with(paths, FILEOPERATION_FLAGS(0))
+pub fn recycle(paths: &[PathBuf], confirmed: bool) -> io::Result<Vec<OpItem>> {
+    recycle_with(paths, confirmed_flags(confirmed))
 }
 
-pub fn delete(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
-    delete_with(paths, FILEOPERATION_FLAGS(0))
+pub fn delete(paths: &[PathBuf], confirmed: bool) -> io::Result<Vec<OpItem>> {
+    delete_with(paths, confirmed_flags(confirmed))
+}
+
+/// After Grids' own confirmation the shell asks nothing more (conflict and
+/// progress UI stay); `recycle_with` then also drops the nuke warning.
+fn confirmed_flags(confirmed: bool) -> FILEOPERATION_FLAGS {
+    if confirmed {
+        FOF_NOCONFIRMATION
+    } else {
+        FILEOPERATION_FLAGS(0)
+    }
+}
+
+const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_CDROM: u32 = 5;
+const DRIVE_RAMDISK: u32 = 6;
+
+/// Best effort: whether recycling `paths` would delete permanently because
+/// their drive has no Recycle Bin (network, removable, optical, RAM disks,
+/// or a volume whose bin can't be queried). Items too large for the bin are
+/// not detected.
+pub fn recycle_would_nuke(paths: &[PathBuf]) -> bool {
+    ensure_com();
+    let mut roots: Vec<String> = Vec::new();
+    for p in paths {
+        let Some(root) = volume_of(p) else {
+            return true;
+        };
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let mut old = THREAD_ERROR_MODE(0);
+    let _ = unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, Some(&mut old)) };
+    let nuke = roots.iter().any(|root| {
+        let w = HSTRING::from(root.as_str());
+        let kind = unsafe { GetDriveTypeW(&w) };
+        if root.starts_with("\\\\")
+            || matches!(
+                kind,
+                DRIVE_REMOTE | DRIVE_REMOVABLE | DRIVE_CDROM | DRIVE_RAMDISK
+            )
+        {
+            return true;
+        }
+        let mut info = SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { SHQueryRecycleBinW(&w, &mut info) }.is_err()
+    });
+    let _ = unsafe { SetThreadErrorMode(old, None) };
+    nuke
 }
 
 pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
@@ -1007,8 +1059,13 @@ pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
 
 fn recycle_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<Vec<OpItem>> {
     let arr = items(paths)?;
-    let flags =
-        FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_WANTNUKEWARNING | FOFX_ADDUNDORECORD | extra;
+    // confirmed in Grids (which warned about permanent deletion itself): no nuke prompt
+    let nuke_warning = if extra.0 & FOF_NOCONFIRMATION.0 != 0 {
+        FILEOPERATION_FLAGS(0)
+    } else {
+        FOF_WANTNUKEWARNING
+    };
+    let flags = FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | nuke_warning | FOFX_ADDUNDORECORD | extra;
     file_op(paths, flags, |op| {
         unsafe { op.DeleteItems(&arr) }.map_err(win_err)
     })
@@ -2407,6 +2464,11 @@ mod tests {
         // move
         let done = move_with(&[d.join("to").join("a.txt")], &d.join("dir"), FOF_NO_UI).unwrap();
         println!("move -> {done:?}");
+        assert!(
+            !crate::recycle_would_nuke(&[d.join("a.txt")]),
+            "temp dir has a Recycle Bin"
+        );
+        assert!(!crate::recycle_would_nuke(&[]));
         assert_eq!(done.len(), 1, "move reported nothing");
         assert!(crate::same_path(
             done[0].dst.as_ref().unwrap(),

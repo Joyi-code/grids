@@ -179,7 +179,12 @@ fn remove(p: &Path) -> io::Result<()> {
     }
 }
 
-pub fn recycle(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+/// The trash never falls back to deleting: without one, recycling fails.
+pub fn recycle_would_nuke(_paths: &[PathBuf]) -> bool {
+    false
+}
+
+pub fn recycle(paths: &[PathBuf], _confirmed: bool) -> io::Result<Vec<OpItem>> {
     let trash = trash_dir()?;
     let files = if cfg!(target_os = "macos") {
         trash.clone()
@@ -228,7 +233,7 @@ fn partial(done: Vec<OpItem>, e: io::Error) -> io::Result<Vec<OpItem>> {
     if done.is_empty() { Err(e) } else { Ok(done) }
 }
 
-pub fn delete(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+pub fn delete(paths: &[PathBuf], _confirmed: bool) -> io::Result<Vec<OpItem>> {
     let mut done = Vec::new();
     for p in paths {
         let is_dir = p.is_dir();
@@ -839,7 +844,7 @@ mod tests {
         // SAFETY: tests touching XDG_DATA_HOME run in this one test only
         unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
         std::fs::write(d.join("gone.txt"), "x").unwrap();
-        recycle(&[d.join("gone.txt")]).unwrap();
+        recycle(&[d.join("gone.txt")], false).unwrap();
         assert!(!d.join("gone.txt").exists());
         if !cfg!(target_os = "macos") {
             assert!(data.join("Trash/files/gone.txt").is_file());
