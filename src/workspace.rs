@@ -629,7 +629,7 @@ impl Workspace {
 
     // ---- version popover and confirmation dialogs
 
-    /// "v0.8.0" at the bottom left (the sidebar's foot, or the status bar's
+    /// "v0.9.0" at the bottom left (the sidebar's foot, or the status bar's
     /// start while the sidebar is hidden); opens the version popover.
     fn version_label(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let b = self.version_btn.clone();

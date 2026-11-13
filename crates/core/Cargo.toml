@@ -2,7 +2,7 @@
 # sessions, favourites. No GPUI, so it builds and tests on its own.
 [package]
 name = "grids_core"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "MIT"
 publish = false
