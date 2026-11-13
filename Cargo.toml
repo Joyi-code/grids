@@ -38,7 +38,6 @@ embed-resource = "3.0.12"
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 taffy = { path = "vendor/taffy" }
-xattr = { path = "vendor/xattr" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

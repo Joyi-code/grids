@@ -58,7 +58,6 @@ test-support = [
     "collections/test-support",
     "rand",
     "util/test-support",
-    "http_client/test-support",
     "wayland",
     "x11",
 ]
@@ -274,9 +273,8 @@ version = "0.3"
 version = "0.2.2"
 package = "gpui-macros"
 
-[dependencies.http_client]
-version = "0.2.2"
-package = "gpui_http_client"
+[dependencies.url]
+version = "2"
 
 [dependencies.image]
 version = "0.25.1"
@@ -429,11 +427,6 @@ package = "gpui_collections"
 
 [dev-dependencies.env_logger]
 version = "0.11"
-
-[dev-dependencies.http_client]
-version = "0.2.2"
-features = ["test-support"]
-package = "gpui_http_client"
 
 [dev-dependencies.lyon]
 version = "1.0"

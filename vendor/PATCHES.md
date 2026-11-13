@@ -1,6 +1,6 @@
 # vendor 补丁
 
-`vendor/gpui` 是 crates.io 的 gpui 0.2.2，`vendor/taffy` 是 taffy 0.9.0，`vendor/xattr` 是 xattr 0.2.3，都打了本地补丁。项目通过 `Cargo.toml` 的 `[patch.crates-io]` 使用这些目录。补丁处都带 `quiet.md:` 注释；完整列表以下表和 diff 为准。
+`vendor/gpui` 是 crates.io 的 gpui 0.2.2，`vendor/taffy` 是 taffy 0.9.0，都打了本地补丁。项目通过 `Cargo.toml` 的 `[patch.crates-io]` 使用这些目录。补丁处都带 `quiet.md:` 注释；完整列表以下表和 diff 为准。
 
 和上游对比：
 
@@ -43,18 +43,13 @@ diff -ru $R/taffy-0.9.0/src vendor/taffy/src
 | 22 | `platform/mac/platform.rs` | 读取剪贴板时同时保留文字和一种图片格式（优先 PNG），跳过空图片数据 | 截图工具同时提供文字和图片时，正文可选择图片，文本输入框仍可读取文字 |
 
 | 23 | `Cargo.toml` | `image` 关闭默认特性，只开 `png`、`gif`、`webp`（img.rs 直接引用后两者） | Grids 只解码 PNG 图标；去掉 JPEG/TIFF/EXR/AVIF 等解码器以减小 exe 体积 |
+| 24 | `Cargo.toml`、`gpui.rs`、`app.rs`、`app/test_context.rs`、`elements/img.rs`、`platform/linux/{x11,wayland}/client.rs` | 去掉 `gpui_http_client` 依赖（连带 zed-reqwest、hyper、rustls、tokio 等）：删除 `App::http_client`/`set_http_client`/`with_http_client` 和 `NullHttpClient`；`img()` 遇到 `scheme://` 地址直接返回「network images are disabled」错误；Linux 拖放用的 `Url` 改从 `url` crate 引入 | Grids 必须完全离线：任何代码路径都不联网，依赖树里也不出现网络库。上游默认就是 `NullHttpClient`，运行时行为不变 |
 
 ## taffy 0.9.0
 
 | 文件 | 改动 | 用途 |
 |---|---|---|
 | `compute/grid/track_sizing.rs` | 「超出限制」阶段只对受影响的轨道分配空间，增长上限只看 `fit-content()` 参数。这是从 taffy 0.13 移植的修复 | 跨多个 auto 行的合并单元格在 min-content 约束下原来不会撑高这些行 |
-
-## xattr 0.2.3
-
-| 文件 | 改动 | 用途 |
-|---|---|---|
-| `src/sys/mod.rs` | Linux/Android 下 `ENOATTR` 映射为 `::libc::ENODATA` | 解决现代 libc crate 在 Linux GNU 下没有 `ENOATTR` 常量导致的编译错误 |
 
 ## 删掉的上游文件
 

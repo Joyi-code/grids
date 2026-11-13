@@ -5,9 +5,9 @@ use crate::{
     SMOOTH_SVG_SCALE_FACTOR, SharedString, SharedUri, StyleRefinement, Styled, SvgSize, Task,
     Window, px, swap_rgba_pa_to_bgra,
 };
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
-use futures::{AsyncReadExt, Future};
+use futures::Future;
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
@@ -18,7 +18,6 @@ use std::{
     io::{self, Cursor},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -49,8 +48,10 @@ pub enum ImageSource {
     Custom(Arc<dyn Fn(&mut Window, &mut App) -> Option<Result<Arc<RenderImage>, ImageCacheError>>>),
 }
 
+// Grids: no network client is compiled in, so "scheme://..." sources are
+// recognised only to report that they can't be loaded.
 fn is_uri(uri: &str) -> bool {
-    http_client::Uri::from_str(uri).is_ok()
+    uri.split_once("://").is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')))
 }
 
 impl From<SharedUri> for ImageSource {
@@ -598,7 +599,6 @@ impl Asset for ImageAssetLoader {
         source: Self::Source,
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
-        let client = cx.http_client();
         // TODO: Can we make SVGs always rescale?
         // let scale_factor = cx.scale_factor();
         let svg_renderer = cx.svg_renderer();
@@ -607,23 +607,9 @@ impl Asset for ImageAssetLoader {
             let bytes = match source.clone() {
                 Resource::Path(uri) => fs::read(uri.as_ref())?,
                 Resource::Uri(uri) => {
-                    let mut response = client
-                        .get(uri.as_ref(), ().into(), true)
-                        .await
-                        .with_context(|| format!("loading image asset from {uri:?}"))?;
-                    let mut body = Vec::new();
-                    response.body_mut().read_to_end(&mut body).await?;
-                    if !response.status().is_success() {
-                        let mut body = String::from_utf8_lossy(&body).into_owned();
-                        let first_line = body.lines().next().unwrap_or("").trim_end();
-                        body.truncate(first_line.len());
-                        return Err(ImageCacheError::BadStatus {
-                            uri,
-                            status: response.status(),
-                            body,
-                        });
-                    }
-                    body
+                    return Err(ImageCacheError::Asset(
+                        format!("network images are disabled: {uri}").into(),
+                    ));
                 }
                 Resource::Embedded(path) => {
                     let data = asset_source.load(&path).ok().flatten();
@@ -727,16 +713,6 @@ pub enum ImageCacheError {
     /// An error that occurred while reading the image from disk.
     #[error("IO error: {0}")]
     Io(Arc<std::io::Error>),
-    /// An error that occurred while processing an image.
-    #[error("unexpected http status for {uri}: {status}, body: {body}")]
-    BadStatus {
-        /// The URI of the image.
-        uri: SharedUri,
-        /// The HTTP status code.
-        status: http_client::StatusCode,
-        /// The HTTP response body.
-        body: String,
-    },
     /// An error that occurred while processing an asset.
     #[error("asset error: {0}")]
     Asset(SharedString),

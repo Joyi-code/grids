@@ -14,7 +14,7 @@ Copyright (c) 2026 s1dashu. https://github.com/s1dashu/quiet-md
 Adapted: the theme tokens and dark-mode colour adaptation (`src/theme.rs`),
 the shared UI pieces such as tooltips, popover shell, menu rows, title bar
 behaviour, window controls and single-line text with ellipsis (`src/ui.rs`),
-the local GPUI / taffy / xattr patches under `vendor/` (see
+the local GPUI / taffy patches under `vendor/` (see
 `vendor/PATCHES.md`), the workspace clippy settings and `rust-toolchain.toml`.
 quiet-md's icons and app name are not used.
 
@@ -52,10 +52,10 @@ text field in `src/input.rs` is adapted from GPUI's `examples/input.rs`
 (Apache-2.0); changes: Grids key context and bindings, placeholder, submit /
 cancel events, horizontal scrolling and selection helpers.
 
-## taffy (MIT) and xattr (MIT / Apache-2.0)
+## taffy (MIT)
 
-Layout engine and extended-attribute crate used by GPUI, with local patches
-in `vendor/taffy` and `vendor/xattr`; their licences are in those folders.
+Layout engine used by GPUI, with local patches in `vendor/taffy`; its
+licence is in that folder.
 
 ## Lucide icons (ISC)
 
