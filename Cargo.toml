@@ -29,7 +29,7 @@ notify = { version = "8", default-features = false }
 futures = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_UI_HiDpi"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_System_Diagnostics_Debug"] }
 
 [build-dependencies]
 embed-resource = "3.0.12"
@@ -54,9 +54,22 @@ field_reassign_with_default = "allow"
 workspace = true
 
 [profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 4
-# line tables (in grids.pdb on Windows) so grids-crash.log backtraces name functions and lines
+# Size first: small code everywhere, full speed for the
+# layout / rendering hot paths. Fat LTO and one codegen unit let the linker
+# drop what Grids never calls.
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+# Line tables go to grids.pdb (a separate file on Windows, uploaded as the
+# symbols artifact), not into grids.exe; crash-log offsets resolve with it.
+# strip = true would make rustc pass /DEBUG:NONE on MSVC and no pdb would be
+# written at all, so stripping is left to the linker (the exe has no symbols).
 debug = "line-tables-only"
 strip = "none"
+# The panic hook still writes grids-crash.log (module base + offsets) first.
+panic = "abort"
+
+[profile.release.package.gpui]
+opt-level = 3
+[profile.release.package.taffy]
+opt-level = 3

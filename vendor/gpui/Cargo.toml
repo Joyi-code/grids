@@ -280,6 +280,10 @@ package = "gpui_http_client"
 
 [dependencies.image]
 version = "0.25.1"
+# Grids: keep PNG (icons) and the GIF / WebP decoders img.rs names; the other
+# codecs (JPEG, TIFF, EXR, AVIF …) only added size.
+default-features = false
+features = ["png", "gif", "webp"]
 
 [dependencies.inventory]
 version = "0.3.19"

@@ -83,6 +83,29 @@ fn env_logger_lite() {
 
 /// Writes panics (message, place, thread, backtrace) to grids-crash.log next
 /// to the executable, then lets the default hook run.
+/// Return addresses as offsets into grids.exe, so a crash from a build
+/// without symbols on the user's machine can be resolved later with the
+/// matching grids.pdb (CI's symbols artifact), e.g. in WinDbg: `ln grids+OFFSET`.
+#[cfg(windows)]
+fn raw_frames() -> String {
+    use windows::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    let mut frames = [std::ptr::null_mut(); 62];
+    // SAFETY: fills our own buffer with this thread's return addresses.
+    let n = unsafe { RtlCaptureStackBackTrace(0, &mut frames, None) } as usize;
+    // SAFETY: the exe's own module handle is its load address.
+    let base = unsafe { GetModuleHandleW(None) }.map(|m| m.0 as usize).unwrap_or(0);
+    let mut out = format!("grids.exe base 0x{base:x}\n");
+    for (i, f) in frames[..n.min(frames.len())].iter().enumerate() {
+        let a = *f as usize;
+        if base != 0 && a >= base && a - base < 0x1000_0000 { out += &format!("  #{i:<2} grids+0x{:x}\n", a - base) } else { out += &format!("  #{i:<2} 0x{a:x}\n") }
+    }
+    out + "\n"
+}
+
+#[cfg(not(windows))]
+fn raw_frames() -> String { String::new() }
+
 fn install_crash_log() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -93,12 +116,13 @@ fn install_crash_log() {
             .unwrap_or_else(|| "(no message)".into());
         let place = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
         let text = format!(
-            "==== {} Grids {} ({} {})\nthread '{}' panicked at {place}:\n{msg}\n\n{bt}\n\n",
+            "==== {} Grids {} ({} {})\nthread '{}' panicked at {place}:\n{msg}\n\n{}{bt}\n\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
             thread.name().unwrap_or("?"),
+            raw_frames(),
         );
         if let Some(path) = crash_log_path() {
             use std::io::Write;

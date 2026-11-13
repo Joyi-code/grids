@@ -42,6 +42,7 @@ diff -ru $R/taffy-0.9.0/src vendor/taffy/src
 | 21 | `platform/mac/metal_atlas.rs` | 删除图片时立即移除 tile 索引，再递减所属纹理的引用计数 | 避免共享纹理仍被使用时残留旧索引，导致重复删除或复用失效 tile |
 | 22 | `platform/mac/platform.rs` | 读取剪贴板时同时保留文字和一种图片格式（优先 PNG），跳过空图片数据 | 截图工具同时提供文字和图片时，正文可选择图片，文本输入框仍可读取文字 |
 
+| 23 | `Cargo.toml` | `image` 关闭默认特性，只开 `png`、`gif`、`webp`（img.rs 直接引用后两者） | Grids 只解码 PNG 图标；去掉 JPEG/TIFF/EXR/AVIF 等解码器以减小 exe 体积 |
 
 ## taffy 0.9.0
 

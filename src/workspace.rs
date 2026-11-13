@@ -18,7 +18,7 @@ use std::time::Duration;
 
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -38,6 +38,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-m", ToggleMaximize, c),
         KeyBinding::new("secondary-b", ToggleSidebar, c),
         KeyBinding::new("secondary-shift-g", PickLayout, c),
+        KeyBinding::new("escape", CloseAbout, Some("About")),
     ]);
 }
 
@@ -80,6 +81,9 @@ pub struct Workspace {
     maximized: Option<usize>,
     layout: Layout,
     picker: bool,
+    /// The About dialog: None when closed, else the tab (0 licence, 1 third-party notices).
+    about: Option<u8>,
+    about_focus: FocusHandle,
     picker_hover: Option<(usize, usize)>,
     grid_bounds: Rc<Cell<Bounds<Pixels>>>,
     layout_btn: Rc<Cell<Bounds<Pixels>>>,
@@ -106,6 +110,8 @@ impl Workspace {
             maximized: None,
             layout: session.layout.clone(),
             picker: false,
+            about: None,
+            about_focus: cx.focus_handle(),
             picker_hover: None,
             grid_bounds: Rc::default(),
             layout_btn: Rc::default(),
@@ -368,6 +374,7 @@ impl Workspace {
                     .tip(if self.maximized.is_some() { tr(cx, "还原宫格", "Restore grid") } else { tr(cx, "最大化当前窗格", "Maximize pane") }, Some("Ctrl+Shift+M"))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx))),
             )
+            .child(header_icon("about", "info", 32., 17.).ml(px(2.)).tip(tr(cx, "关于 Grids", "About Grids"), None).on_click(cx.listener(|this, _, window, cx| { this.about = Some(0); this.about_focus.focus(window); cx.notify() })))
             .child(header_icon("theme", theme_icon, 32., 17.).ml(px(2.)).tip(theme_tip, None).on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))))
             .children(controls)
             .when(!has_controls, |d| d.pr(px(8.)))
@@ -385,6 +392,69 @@ impl Workspace {
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.maximized = if self.maximized.is_some() { None } else { Some(self.active) };
         self.set_active(self.active, window, cx);
+    }
+
+    fn close_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.about = None;
+        let p = self.panes.get(self.active).cloned();
+        if let Some(p) = p { p.update(cx, |p, _| p.focus.clone()).focus(window) }
+        cx.notify();
+    }
+
+    /// About: name, version, and the licence texts compiled into the exe
+    /// (MIT attribution travels with grids.exe alone).
+    fn render_about(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const LICENSE: &str = include_str!("../LICENSE");
+        const THIRD_PARTY: &str = include_str!("../THIRD_PARTY.md");
+        let tab = self.about?;
+        let tab_btn = |id: &'static str, label: &'static str, n: u8| {
+            div().id(id).h(px(28.)).px(px(10.)).rounded(px(7.)).flex().items_center().cursor_pointer()
+                .text_color(if tab == n { Theme::text() } else { Theme::text_caption() })
+                .when(tab == n, |d| d.bg(Theme::fill_hover_strong()))
+                .hover(|s| s.bg(Theme::fill_hover()))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| { this.about = Some(n); cx.notify() }))
+        };
+        let text = if tab == 0 { LICENSE } else { THIRD_PARTY };
+        let panel = popover()
+            .id("about")
+            .w(px(640.))
+            // A definite height so the text area (flex_1) scrolls instead of
+            // growing to its content.
+            .h((window.viewport_size().height * 0.85).min(px(640.)))
+            .flex()
+            .flex_col()
+            .text_size(px(theme::UI_SIZE))
+            .occlude()
+            .track_focus(&self.about_focus)
+            .key_context("About")
+            .on_action(cx.listener(|this, _: &CloseAbout, window, cx| this.close_about(window, cx)))
+            .child(
+                div().flex().items_center().gap(px(12.)).p(px(20.)).pb(px(12.))
+                    .child(img("icon/grids-48.png").size(px(40.)).flex_none())
+                    .child(div().flex_1().flex().flex_col().gap(px(2.))
+                        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(format!("Grids {}", env!("CARGO_PKG_VERSION"))))
+                        .child(div().text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器 · MIT 许可证", "Multi-pane file manager · MIT licence"))))
+                    .child(header_icon("about-close", "x", 28., 16.).tip(tr(cx, "关闭", "Close"), Some("Esc")).on_click(cx.listener(|this, _, window, cx| this.close_about(window, cx)))),
+            )
+            .child(div().flex().gap(px(4.)).px(px(16.)).pb(px(8.))
+                .child(tab_btn("about-license", tr(cx, "许可证", "Licence"), 0))
+                .child(tab_btn("about-third", tr(cx, "第三方声明", "Third-party notices"), 1)))
+            .child(div().h(px(1.)).bg(Theme::line_divider()))
+            .child(
+                div().id(("about-text", tab as usize)).flex_1().min_h(px(120.)).overflow_y_scroll().px(px(20.)).py(px(12.))
+                    .font_family(theme::MONO_FONT).text_size(px(12.)).line_height(px(18.)).text_color(Theme::text())
+                    .children(text.lines().map(|l| div().min_h(px(18.)).child(SharedString::from(l.to_string())))),
+            );
+        Some(
+            deferred(
+                div().id("about-scrim").absolute().inset_0().flex().items_center().justify_center().bg(gpui::black().opacity(0.18)).occlude()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_about(window, cx)))
+                    .child(panel),
+            )
+            .with_priority(4)
+            .into_any_element(),
+        )
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -736,5 +806,6 @@ impl Render for Workspace {
                     .child(self.render_status(cx)),
             )
             .children(self.render_picker(cx))
+            .children(self.render_about(window, cx))
     }
 }

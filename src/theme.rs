@@ -242,6 +242,14 @@ pub const UI_FONT: &str = ".SystemUIFont";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const UI_FONT: &str = "Noto Sans CJK SC";
 
+/// Monospace, for licence texts.
+#[cfg(target_os = "windows")]
+pub const MONO_FONT: &str = "Consolas";
+#[cfg(target_os = "macos")]
+pub const MONO_FONT: &str = "Menlo";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const MONO_FONT: &str = "DejaVu Sans Mono";
+
 /// Interface text size (quiet-md's default 界面字号) and the smaller one.
 pub const UI_SIZE: f32 = 13.;
 pub const UI_SMALL: f32 = 12.;
