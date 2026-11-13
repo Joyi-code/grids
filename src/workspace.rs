@@ -94,6 +94,9 @@ struct Confirm {
     title: SharedString,
     body: SharedString,
     ok: SharedString,
+    /// Names listed under the body (at most five) and the rest's count line.
+    names: Vec<SharedString>,
+    more: Option<SharedString>,
     action: Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>,
     /// The focused button: 0 Cancel (the default), 1 the action.
     focus: u8,
@@ -187,6 +190,7 @@ impl Workspace {
                 for p in this.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(dirs, cx)) }
             }
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
+            PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
             PaneEvent::OpenInNext(path) => {
                 let n = this.panes.len();
                 let Some(i) = this.panes.iter().position(|p| p == pane) else { return };
@@ -246,7 +250,7 @@ impl Workspace {
     // ---- sessions and saving
 
     fn session(&self, cx: &App) -> Session {
-        Session { layout: self.layout.clone(), panes: self.panes.iter().map(|p| p.read(cx).save()).collect(), active: self.active }
+        Session { layout: self.layout.clone(), panes: self.panes.iter().map(|p| p.read(cx).save()).collect(), active: self.active, ..state::shared(cx).config.current.clone() }
     }
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
@@ -631,12 +635,60 @@ impl Workspace {
             title: tr(cx, "删除会话", "Delete session").into(),
             body: body.into(),
             ok: tr(cx, "删除", "Delete").into(),
+            names: vec![],
+            more: None,
             action: Rc::new(move |this, _, cx| {
                 cx.global_mut::<Shared>().config.delete_session(&name);
                 this.schedule_save(cx);
             }),
             focus: 0,
         });
+        self.dialog_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Delete / Shift+Delete in a pane: our confirmation, then the delete
+    /// without any system prompt. A drive without a recycle bin gets the
+    /// permanent wording (that check runs off the UI thread).
+    fn ask_delete_files(&mut self, pane: Entity<PaneView>, paths: Vec<PathBuf>, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if permanent { return self.show_delete_confirm(pane, paths, true, window, cx) }
+        let probe = paths.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let nuke = cx.background_executor().spawn(async move { grids_shell::recycle_would_nuke(&probe) }).await;
+            let _ = this.update_in(cx, |this, window, cx| this.show_delete_confirm(pane, paths, nuke, window, cx));
+        }).detach();
+    }
+
+    fn show_delete_confirm(&mut self, pane: Entity<PaneView>, paths: Vec<PathBuf>, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let en = state::en(cx);
+        let n = paths.len();
+        let name = |p: &PathBuf| p.file_name().map_or_else(|| p.to_string_lossy().into_owned(), |s| s.to_string_lossy().into_owned());
+        let one = (n == 1).then(|| name(&paths[0]));
+        let body = match (permanent, &one, en) {
+            (false, Some(f), false) => format!("将「{f}」移入回收站？"),
+            (false, None, false) => format!("将 {n} 项移入回收站？"),
+            (true, Some(f), false) => format!("永久删除「{f}」？删除后无法从回收站恢复。"),
+            (true, None, false) => format!("永久删除 {n} 项？删除后无法从回收站恢复。"),
+            (false, Some(f), true) => format!("Move “{f}” to the Recycle Bin?"),
+            (false, None, true) => format!("Move {n} items to the Recycle Bin?"),
+            (true, Some(f), true) => format!("Permanently delete “{f}”? It can't be restored from the Recycle Bin."),
+            (true, None, true) => format!("Permanently delete {n} items? They can't be restored from the Recycle Bin."),
+        };
+        let names: Vec<SharedString> = if n > 1 { paths.iter().take(5).map(|p| name(p).into()).collect() } else { vec![] };
+        let more = (n > 5).then(|| SharedString::from(if en { format!("and {} more", n - 5) } else { format!("等 {n} 项") }));
+        self.confirm = Some(Confirm {
+            title: if permanent { tr(cx, "永久删除", "Delete permanently") } else { tr(cx, "移入回收站", "Move to Recycle Bin") }.into(),
+            body: body.into(),
+            ok: if permanent { tr(cx, "永久删除", "Delete permanently") } else { tr(cx, "删除", "Delete") }.into(),
+            names,
+            more,
+            action: Rc::new(move |_, _, cx| {
+                let paths = paths.clone();
+                pane.update(cx, |p, cx| p.delete_confirmed(paths, permanent, cx));
+            }),
+            focus: 0,
+        });
+        self.version_pop = false;
         self.dialog_focus.focus(window);
         cx.notify();
     }
@@ -691,6 +743,12 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(c.title.clone()))
             .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(ui_text(c.body.clone())))
+            .when(!c.names.is_empty(), |d| d.child(
+                div().mt(px(8.)).px(px(10.)).py(px(6.)).rounded(px(6.)).bg(Theme::fill_hover()).flex().flex_col()
+                    .text_size(px(12.)).line_height(px(19.)).text_color(Theme::text())
+                    .children(c.names.iter().map(|n| div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(n.clone()))))
+                    .children(c.more.clone().map(|m| div().text_color(Theme::text_caption()).child(m))),
+            ))
             .child(
                 div().mt(px(20.)).flex().justify_end().gap(px(8.))
                     .child(button("confirm-cancel", tr(cx, "取消", "Cancel").into(), false, c.focus == 0)

@@ -117,6 +117,9 @@ pub enum PaneEvent {
     Toast(String),
     /// Show this folder in the next pane (menu: "Open in next pane").
     OpenInNext(PathBuf),
+    /// Delete these (to the recycle bin unless `permanent`) once the user
+    /// confirms in the workspace's dialog.
+    AskDelete { paths: Vec<PathBuf>, permanent: bool },
 }
 
 /// Files dragged from a pane.
@@ -599,6 +602,19 @@ impl PaneView {
 
     /// Runs a copy / move / delete on a background thread (Windows shows its
     /// own progress and confirmation), then refreshes the folders involved.
+    /// Delete / Shift+Delete: the workspace asks first (our dialog, never
+    /// the system's), then calls `delete_confirmed`.
+    fn ask_delete(&mut self, permanent: bool, cx: &mut Context<Self>) {
+        let paths = self.state.targets();
+        if paths.is_empty() { return }
+        cx.emit(PaneEvent::AskDelete { paths, permanent })
+    }
+
+    /// Runs a delete the user has confirmed.
+    pub fn delete_confirmed(&mut self, paths: Vec<PathBuf>, permanent: bool, cx: &mut Context<Self>) {
+        self.run_op(if permanent { Op::Delete } else { Op::Recycle }, paths, None, vec![], cx)
+    }
+
     fn run_op(&mut self, op: Op, paths: Vec<PathBuf>, dest: Option<PathBuf>, select: Vec<String>, cx: &mut Context<Self>) {
         if paths.is_empty() { return }
         let mut dirs: Vec<PathBuf> = paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
@@ -611,8 +627,9 @@ impl PaneView {
                 match (op, dest) {
                     (Op::Copy, Some(d)) => grids_shell::copy(&paths, &d),
                     (Op::Move, Some(d)) => grids_shell::move_(&paths, &d),
-                    (Op::Recycle, _) => grids_shell::recycle(&paths),
-                    (Op::Delete, _) => grids_shell::delete(&paths),
+                    // Confirmed in our own dialog already: no system prompt.
+                    (Op::Recycle, _) => grids_shell::recycle_confirmed(&paths),
+                    (Op::Delete, _) => grids_shell::delete_confirmed(&paths),
                     _ => Ok(()),
                 }
             }).await;
@@ -804,7 +821,7 @@ impl PaneView {
             Cmd::PasteInto(d) => self.paste_into(d, cx),
             Cmd::CopyPath => self.copy_paths(cx),
             Cmd::Rename => self.start_rename(window, cx),
-            Cmd::Delete => self.run_op(Op::Recycle, targets, None, vec![], cx),
+            Cmd::Delete => self.ask_delete(false, cx),
             Cmd::Zip => if let Some(p) = first {
                 let stem = if targets.len() == 1 { p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() } else { dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "archive".into()) };
                 let name = paths::unique_name(&dir, &format!("{stem}.zip"));
@@ -1376,8 +1393,8 @@ impl Render for PaneView {
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.go_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.go_forward(cx)))
             .on_action(cx.listener(|this, _: &Rename, window, cx| this.start_rename(window, cx)))
-            .on_action(cx.listener(|this, _: &Recycle, _, cx| { let t = this.state.targets(); this.run_op(Op::Recycle, t, None, vec![], cx) }))
-            .on_action(cx.listener(|this, _: &DeletePermanently, _, cx| { let t = this.state.targets(); this.run_op(Op::Delete, t, None, vec![], cx) }))
+            .on_action(cx.listener(|this, _: &Recycle, _, cx| this.ask_delete(false, cx)))
+            .on_action(cx.listener(|this, _: &DeletePermanently, _, cx| this.ask_delete(true, cx)))
             .on_action(cx.listener(|this, _: &CopyFiles, _, cx| this.copy_files(false, cx)))
             .on_action(cx.listener(|this, _: &CutFiles, _, cx| this.copy_files(true, cx)))
             .on_action(cx.listener(|this, _: &PasteFiles, _, cx| this.paste(cx)))
@@ -1486,3 +1503,4 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
