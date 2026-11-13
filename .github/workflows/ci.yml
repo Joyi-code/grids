@@ -93,29 +93,55 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # size report only: never fails the build
-      - name: Install cargo-bloat
-        continue-on-error: true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-bloat
+  # cargo bloat rebuilds with full debug info on MSVC (it sets CARGO_PROFILE_RELEASE_DEBUG=true),
+  # so it gets its own job beside the release build instead of doubling that job's time
+  size:
+    name: Windows size report (cargo bloat)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
 
-      - name: Size report (cargo bloat)
-        continue-on-error: true
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bloat
+
+      - name: Locate fxc.exe
         shell: pwsh
         run: |
-          # same profile and flags as the build above, so cargo reuses it instead of rebuilding
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($fxc) { "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV }
+
+      - name: Install cargo-bloat
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo-bloat -ErrorAction SilentlyContinue)) {
+            cargo install cargo-bloat --locked
+          }
+
+      - name: cargo bloat
+        shell: pwsh
+        run: |
           $fns = cargo bloat --release --locked --bin grids -n 30 2>&1 | Out-String
+          # the second run reuses the first build
           $crates = cargo bloat --release --locked --bin grids --crates -n 30 2>&1 | Out-String
           $fns
           $crates
-          "## Size: largest functions" >> $env:GITHUB_STEP_SUMMARY
+          $exe = Get-Item target/release/grids.exe
+          "## Size report (cargo bloat)" >> $env:GITHUB_STEP_SUMMARY
+          "This build keeps full debug info for the analysis; the shipped grids.exe size is in the Windows build job's summary (this one: $($exe.Length) bytes)." >> $env:GITHUB_STEP_SUMMARY
+          "### Largest functions" >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
-          $fns.TrimEnd() >> $env:GITHUB_STEP_SUMMARY
+          ($fns -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
-          "## Size: by crate" >> $env:GITHUB_STEP_SUMMARY
+          "### By crate" >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
-          $crates.TrimEnd() >> $env:GITHUB_STEP_SUMMARY
+          ($crates -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
 
   linux:
