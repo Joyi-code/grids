@@ -223,6 +223,7 @@ impl Workspace {
                     });
                 }).detach();
             }),
+            danger: true,
             focus: 0,
         });
         self.dialog_focus.focus(window);
@@ -371,7 +372,7 @@ impl Workspace {
 
 /// A click handler on the workspace from inside a `uniform_list` row
 /// (which only has `&mut App`).
-fn window_listener(view: &Entity<Workspace>, f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+pub(super) fn window_listener(view: &Entity<Workspace>, f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
     let view = view.downgrade();
     move |_, window, cx| {
         cx.stop_propagation();

@@ -23,18 +23,21 @@ mod lockers;
 pub use lockers::Then as LockersThen;
 mod palette;
 mod today;
+mod history;
 
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette, OpenToday]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette, OpenToday, UndoLast, OpenHistory]
 );
 
 pub fn bind_keys(cx: &mut App) {
     palette::bind_keys(cx);
     today::bind_keys(cx);
+    history::bind_keys(cx);
     let c = Some("Workspace");
     cx.bind_keys([
         KeyBinding::new("secondary-k", CommandPalette, c),
+        KeyBinding::new("secondary-z", UndoLast, c),
         KeyBinding::new("ctrl-tab", NextPane, c),
         KeyBinding::new("ctrl-shift-tab", PrevPane, c),
         KeyBinding::new("secondary-1", Pane1, c),
@@ -109,6 +112,8 @@ struct Confirm {
     /// Names listed under the body (at most five) and the rest's count line.
     names: Vec<SharedString>,
     more: Option<SharedString>,
+    /// The action button is red (deletes); otherwise the accent colour.
+    danger: bool,
     action: Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>,
     /// The focused button: 0 Cancel (the default), 1 the action.
     focus: u8,
@@ -161,6 +166,7 @@ pub struct Workspace {
     palette: Option<palette::Palette>,
     today: Option<today::Today>,
     lockers: Option<lockers::LockersDlg>,
+    history: Option<history::HistoryPanel>,
     _subs: Vec<Subscription>,
 }
 
@@ -202,6 +208,7 @@ impl Workspace {
             palette: None,
             today: None,
             lockers: None,
+            history: None,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -229,11 +236,7 @@ impl Workspace {
                 if let Some(i) = this.panes.iter().position(|p| p == pane) && i != this.active { this.set_active_only(i, cx) }
             }
             PaneEvent::Changed => { this.schedule_save(cx); this.recheck_shelf(cx) }
-            PaneEvent::FsChanged(dirs) => {
-                for p in this.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(dirs, cx)) }
-                this.recheck_shelf(cx);
-                for d in dirs { this.today_disk_changed(d, cx) }
-            }
+            PaneEvent::FsChanged(dirs) => this.fs_changed(dirs, cx),
             PaneEvent::DiskChanged(dir) => this.today_disk_changed(dir, cx),
             PaneEvent::Moved(path) => if let Some(i) = this.panes.iter().position(|p| p == pane) { this.link_moved(i, path, cx) },
             PaneEvent::Listed => if !state::shared(cx).config.current.links.is_empty() { this.sync_links(cx) },
@@ -294,6 +297,14 @@ impl Workspace {
     }
 
     fn active_pane(&self) -> Option<&Entity<PaneView>> { self.panes.get(self.active) }
+
+    /// After an operation changed `dirs`: panes showing them, the shelf and
+    /// the Today view catch up.
+    fn fs_changed(&mut self, dirs: &[PathBuf], cx: &mut Context<Self>) {
+        for p in self.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(dirs, cx)) }
+        self.recheck_shelf(cx);
+        for d in dirs { self.today_disk_changed(d, cx) }
+    }
 
     fn show_toast(&mut self, msg: String, cx: &mut Context<Self>) {
         self.toast_seq += 1;
@@ -735,6 +746,7 @@ impl Workspace {
                 cx.global_mut::<Shared>().config.delete_session(&name);
                 this.schedule_save(cx);
             }),
+            danger: true,
             focus: 0,
         });
         self.dialog_focus.focus(window);
@@ -791,6 +803,7 @@ impl Workspace {
                 let paths = paths.clone();
                 pane.update(cx, |p, cx| p.delete_confirmed(paths, permanent, cx));
             }),
+            danger: true,
             focus: 0,
         });
         self.version_pop = false;
@@ -816,6 +829,7 @@ impl Workspace {
                 } else {
                     d.bg(Theme::fill_hover_strong()).text_color(Theme::text()).hover(|s| s.bg(Theme::fill_pressed()))
                 })
+                .when(!danger && id == "confirm-ok", |d| d.bg(Theme::primary()).text_color(gpui::white()).font_weight(FontWeight::MEDIUM).hover(|s| s.bg(Theme::primary()).opacity(0.9)))
                 .child(label)
         };
         let card = div()
@@ -847,7 +861,8 @@ impl Workspace {
             }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(c.title.clone()))
-            .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(ui_text(c.body.clone())))
+            // plain text: it wraps (UiText is one line)
+            .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(c.body.clone()))
             .when(!c.names.is_empty(), |d| d.child(
                 div().mt(px(8.)).px(px(10.)).py(px(6.)).rounded(px(6.)).bg(Theme::fill_hover()).flex().flex_col()
                     .text_size(px(12.)).line_height(px(19.)).text_color(Theme::text())
@@ -858,7 +873,7 @@ impl Workspace {
                 div().mt(px(20.)).flex().justify_end().gap(px(8.))
                     .child(button("confirm-cancel", tr(cx, "取消", "Cancel").into(), false, c.focus == 0)
                         .on_click(cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx))))
-                    .child(button("confirm-ok", c.ok.clone(), true, c.focus == 1)
+                    .child(button("confirm-ok", c.ok.clone(), c.danger, c.focus == 1)
                         .on_click(cx.listener(|this, _, window, cx| this.close_confirm(true, window, cx)))),
             );
         Some(
@@ -1475,6 +1490,13 @@ impl Workspace {
                         .child(tr(cx, "解锁", "Unlock"))
                         .on_click(cx.listener(move |this, _, window, cx| this.unlock(root.clone(), window, cx)))
                 })))
+            .child(div().id("status-history").flex_none().h(px(22.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(4.)).cursor_pointer()
+                .when(self.history.is_some(), |d| d.bg(Theme::fill_hover_strong()).text_color(Theme::text()))
+                .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
+                .child(icon("history", 13., Theme::icon()))
+                .child(tr(cx, "历史", "History"))
+                .tip(tr(cx, "操作历史与撤销", "History and undo"), Some("Ctrl+Z"))
+                .on_click(cx.listener(|this, _, window, cx| this.open_history(window, cx))))
             .when(hint, |d| d.child(div().flex_none().whitespace_nowrap().child("Ctrl+Tab / Ctrl+1…9")))
     }
 }
@@ -1516,6 +1538,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CycleTheme, window, cx| this.cycle_theme(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenToday, window, cx| this.open_today(window, cx)))
+            .on_action(cx.listener(|this, _: &UndoLast, window, cx| this.undo_last(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenHistory, window, cx| this.open_history(window, cx)))
             .on_drag_move::<SplitDrag>(cx.listener(|this, ev: &DragMoveEvent<SplitDrag>, _, cx| {
                 let d = ev.drag(cx).clone();
                 let b = this.grid_bounds.get();
@@ -1555,6 +1579,7 @@ impl Render for Workspace {
             .children(self.render_picker(cx))
             .children(self.render_version_pop(window, cx))
             .children(self.render_about(window, cx))
+            .children(self.render_history(cx))
             .children(self.render_confirm(cx))
             .children(self.render_lockers(cx))
             .children(self.render_note_edit(cx))

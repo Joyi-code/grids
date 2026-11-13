@@ -238,7 +238,7 @@ impl Workspace {
             .child(div().flex().items_center().gap(px(8.))
                 .child(icon(if d.list.is_none() { "refresh-cw" } else { "file-lock" }, 17., Theme::icon()))
                 .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title)))
-            .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(ui_text(body)))
+            .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(body))
             .when(!rows.is_empty(), |c| c.child(div().id("locker-list").mt(px(10.)).max_h(px(260.)).overflow_y_scroll().flex().flex_col().gap(px(2.)).children(rows)))
             .when(truncated, |c| c.child(div().mt(px(8.)).text_size(px(12.)).text_color(Theme::text_caption()).child(if en { format!("Only the first {} files were checked.", grids_shell::LOCKERS_MAX_FILES) } else { format!("文件较多，只检查了前 {} 个。", grids_shell::LOCKERS_MAX_FILES) })))
             .children(d.note.clone().map(|n| div().mt(px(8.)).text_size(px(12.)).text_color(Theme::danger()).child(n)))

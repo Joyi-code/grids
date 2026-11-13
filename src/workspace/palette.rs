@@ -87,6 +87,8 @@ fn act<A: Action + Default>() -> Act { Act::Action(Rc::new(A::default())) }
 
 const COMMANDS: &[Command] = &[
     Command { zh: "今日视图", en: "Today", glyph: "calendar-clock", make: || Act::Today },
+    Command { zh: "操作历史", en: "History", glyph: "history", make: act::<OpenHistory> },
+    Command { zh: "撤销上一步操作", en: "Undo last operation", glyph: "undo-2", make: act::<UndoLast> },
     Command { zh: "新建文件夹", en: "New folder", glyph: "folder-plus", make: act::<pane::NewFolder> },
     Command { zh: "刷新", en: "Refresh", glyph: "refresh-cw", make: act::<pane::Refresh> },
     Command { zh: "上一级", en: "Up one level", glyph: "arrow-up", make: act::<pane::GoUp> },

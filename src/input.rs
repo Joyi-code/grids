@@ -7,7 +7,7 @@ use gpui::*;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
-actions!(text_input, [Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, SelectHome, SelectEnd, Paste, Cut, Copy, Submit, Cancel]);
+actions!(text_input, [Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, SelectHome, SelectEnd, Paste, Cut, Copy, Submit, Cancel, KeepUndo]);
 
 pub fn bind_keys(cx: &mut App) {
     let c = Some("TextInput");
@@ -28,6 +28,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-x", Cut, c),
         KeyBinding::new("enter", Submit, c),
         KeyBinding::new("escape", Cancel, c),
+        // Ctrl+Z while typing must not undo a file operation (the
+        // workspace binding): the field swallows it.
+        KeyBinding::new("secondary-z", KeepUndo, c),
     ]);
 }
 
@@ -336,6 +339,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
+            .on_action(|_: &KeepUndo, _, _| {})
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_home))
