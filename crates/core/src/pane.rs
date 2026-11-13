@@ -277,6 +277,23 @@ impl PaneState {
         self.selected = self.view.iter().copied().collect();
     }
 
+    /// Entry indices of the current selection.
+    pub fn selected_indices(&self) -> Vec<usize> { self.selected.iter().copied().collect() }
+
+    /// Rubber-band selection: the rows the box touches, plus `base` (entries
+    /// selected before a Ctrl+drag started).
+    pub fn select_rows(&mut self, rows: &[usize], base: &[usize]) {
+        self.selected.clear();
+        self.selected.extend(base.iter().copied());
+        for &r in rows {
+            if let Some(&i) = self.view.get(r) { self.selected.insert(i); }
+        }
+        if let Some(&r) = rows.first() {
+            self.cursor = Some(r);
+            self.anchor = Some(r);
+        }
+    }
+
     pub fn clear_selection(&mut self) { self.selected.clear() }
 
     /// Moves the cursor by `delta` rows (clamped); `to_end` jumps to the

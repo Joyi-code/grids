@@ -356,6 +356,8 @@ impl Workspace {
 
     fn load_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
         let session = session.normalized(&home_dir());
+        // The Today view covers the grid: leave it, or the switch looks dead.
+        self.leave_today(window, cx);
         self.layout = session.layout.clone();
         self.maximized = None;
         self.sync_max(cx);
@@ -461,11 +463,13 @@ impl Workspace {
     }
 
     fn go_to(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.drop_today();
+        // The Today view covers the grid: leave it, or the click looks dead.
+        self.leave_today(window, cx);
         if let Some(p) = self.active_pane().cloned() {
             p.update(cx, |p, cx| p.navigate(path, cx));
             window.focus(&p.read(cx).focus);
         }
+        cx.notify();
     }
 
     // ---- rendering

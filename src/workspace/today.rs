@@ -75,6 +75,14 @@ impl Workspace {
         if let Some(t) = self.today.take() { t.cancel.store(true, Ordering::Relaxed) }
     }
 
+    /// Closes the view and hands the focus back to the active pane.
+    /// `go_to` and the session switch call this, so the grid comes back.
+    pub(super) fn leave_today(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.today.is_none() { return }
+        self.drop_today();
+        self.refocus(window, cx);
+    }
+
     fn today_roots(&self, cx: &App) -> Vec<(usize, PathBuf)> {
         let mut out: Vec<(usize, PathBuf)> = Vec::new();
         for (i, p) in self.panes.iter().enumerate() {
