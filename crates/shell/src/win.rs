@@ -20,6 +20,17 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     DeleteObject, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ,
 };
+use windows::Win32::Networking::WinHttp::{
+    ERROR_WINHTTP_CANNOT_CONNECT, ERROR_WINHTTP_CONNECTION_ERROR,
+    ERROR_WINHTTP_INVALID_SERVER_RESPONSE, ERROR_WINHTTP_NAME_NOT_RESOLVED,
+    ERROR_WINHTTP_REDIRECT_FAILED, ERROR_WINHTTP_SECURE_FAILURE, ERROR_WINHTTP_TIMEOUT,
+    URL_COMPONENTS, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD,
+    WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS, WINHTTP_QUERY_CONTENT_LENGTH,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpAddRequestHeaders,
+    WinHttpCloseHandle, WinHttpConnect, WinHttpCrackUrl, WinHttpOpen, WinHttpOpenRequest,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetTimeouts,
+};
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, GetDriveTypeW,
     GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW, WIN32_FIND_DATAW,
@@ -1660,6 +1671,155 @@ unsafe fn hbitmap_to_rgba(bmp: HBITMAP) -> Option<RgbaImage> {
         }
     }
     RgbaImage::from_raw(w as u32, h as u32, px)
+}
+
+// ---------- http ----------
+
+struct Net(*mut core::ffi::c_void);
+
+impl Drop for Net {
+    fn drop(&mut self) {
+        let _ = unsafe { WinHttpCloseHandle(self.0) };
+    }
+}
+
+fn net(h: *mut core::ffi::c_void) -> Result<Net, String> {
+    if h.is_null() {
+        Err(net_error())
+    } else {
+        Ok(Net(h))
+    }
+}
+
+/// The last WinHTTP failure as a short sentence for the UI.
+fn net_error() -> String {
+    let code = io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+    match code {
+        ERROR_WINHTTP_TIMEOUT => "连接超时".into(),
+        ERROR_WINHTTP_NAME_NOT_RESOLVED => "无法解析服务器地址，请检查网络".into(),
+        ERROR_WINHTTP_CANNOT_CONNECT => "无法连接服务器".into(),
+        ERROR_WINHTTP_CONNECTION_ERROR => "连接中断".into(),
+        ERROR_WINHTTP_SECURE_FAILURE => "安全连接失败（证书或 TLS 错误）".into(),
+        ERROR_WINHTTP_REDIRECT_FAILED => "重定向失败".into(),
+        ERROR_WINHTTP_INVALID_SERVER_RESPONSE => "服务器响应无效".into(),
+        0 => "网络错误".into(),
+        n => format!("网络错误（代码 {n}）"),
+    }
+}
+
+fn query_number(r: &Net, what: u32) -> Option<u32> {
+    let (mut v, mut len) = (0u32, 4u32);
+    unsafe {
+        WinHttpQueryHeaders(
+            r.0,
+            what | WINHTTP_QUERY_FLAG_NUMBER,
+            PCWSTR::null(),
+            Some(&mut v as *mut u32 as _),
+            &mut len,
+            std::ptr::null_mut(),
+        )
+    }
+    .ok()?;
+    Some(v)
+}
+
+/// GET over WinHTTP with the system proxy. Redirects are followed (never
+/// from https down to http, WinHTTP's default policy).
+pub fn http_get(
+    url: &str,
+    max_bytes: usize,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let https = crate::check_url(url)?;
+    let cancelled = || -> Result<(), String> {
+        if cancel.load(Relaxed) {
+            Err(crate::CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    };
+    unsafe {
+        let agent = HSTRING::from(crate::user_agent());
+        let s = net(WinHttpOpen(
+            &agent,
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            0,
+        ))?;
+        // resolve, connect, send, each receive
+        WinHttpSetTimeouts(s.0, 15_000, 15_000, 30_000, 30_000).map_err(|_| net_error())?;
+        let wide: Vec<u16> = url.encode_utf16().collect();
+        let mut uc = URL_COMPONENTS {
+            dwStructSize: size_of::<URL_COMPONENTS>() as u32,
+            dwHostNameLength: u32::MAX,
+            dwUrlPathLength: u32::MAX,
+            dwExtraInfoLength: u32::MAX,
+            ..Default::default()
+        };
+        WinHttpCrackUrl(&wide, 0, &mut uc).map_err(|_| "地址格式不正确".to_string())?;
+        let part = |p: PWSTR, n: u32| {
+            if p.is_null() || n == 0 {
+                String::new()
+            } else {
+                String::from_utf16_lossy(std::slice::from_raw_parts(p.0, n as usize))
+            }
+        };
+        let host = part(uc.lpszHostName, uc.dwHostNameLength);
+        let mut path = part(uc.lpszUrlPath, uc.dwUrlPathLength)
+            + &part(uc.lpszExtraInfo, uc.dwExtraInfoLength);
+        if path.is_empty() {
+            path.push('/');
+        }
+        cancelled()?;
+        let c = net(WinHttpConnect(s.0, &HSTRING::from(host), uc.nPort, 0))?;
+        let flags = if https {
+            WINHTTP_FLAG_SECURE
+        } else {
+            WINHTTP_OPEN_REQUEST_FLAGS(0)
+        };
+        let r = net(WinHttpOpenRequest(
+            c.0,
+            w!("GET"),
+            &HSTRING::from(path),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            std::ptr::null(),
+            flags,
+        ))?;
+        let accept: Vec<u16> = crate::ACCEPT_HEADER.encode_utf16().collect();
+        let _ = WinHttpAddRequestHeaders(r.0, &accept, WINHTTP_ADDREQ_FLAG_ADD);
+        WinHttpSendRequest(r.0, None, None, 0, 0, 0).map_err(|_| net_error())?;
+        WinHttpReceiveResponse(r.0, std::ptr::null_mut()).map_err(|_| net_error())?;
+        let code = query_number(&r, WINHTTP_QUERY_STATUS_CODE).unwrap_or(0);
+        crate::check_status(code)?;
+        let total = query_number(&r, WINHTTP_QUERY_CONTENT_LENGTH).map(u64::from);
+        if total.is_some_and(|t| t > max_bytes as u64) {
+            return Err(crate::too_large(max_bytes));
+        }
+        progress(0, total);
+        let (mut out, mut buf) = (Vec::new(), vec![0u8; 64 << 10]);
+        loop {
+            cancelled()?;
+            let mut n = 0u32;
+            WinHttpReadData(r.0, buf.as_mut_ptr() as _, buf.len() as u32, &mut n)
+                .map_err(|_| net_error())?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(buf.get(..n as usize).unwrap_or_default());
+            if out.len() > max_bytes {
+                return Err(crate::too_large(max_bytes));
+            }
+            progress(out.len() as u64, total);
+        }
+        if total.is_some_and(|t| t != out.len() as u64) {
+            return Err("下载不完整".into());
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

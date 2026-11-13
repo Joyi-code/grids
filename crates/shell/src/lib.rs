@@ -356,6 +356,66 @@ pub fn thumbnail(path: &Path, size_px: u32) -> Option<RgbaImage> {
     imp::thumbnail(path, size_px)
 }
 
+/// Downloads `url` (https; plain http only to localhost / 127.0.0.1) and
+/// returns the body of a 2xx answer, at most `max_bytes`. Redirects are
+/// followed (GitHub release assets go through a 302). Sends
+/// `User-Agent: Grids/<version>` and `Accept: application/vnd.github+json`.
+/// `progress(received, content_length)` is called as data arrives;
+/// `cancel` is checked between reads (each read waits at most 30 s).
+/// Errors are short Chinese sentences meant for the UI as they are.
+/// Windows: WinHTTP with the system proxy. Elsewhere: `curl`, if installed.
+/// Blocks: background thread.
+pub fn http_get(
+    url: &str,
+    max_bytes: usize,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>, String> {
+    imp::http_get(url, max_bytes, progress, cancel)
+}
+
+const ACCEPT_HEADER: &str = "Accept: application/vnd.github+json, */*";
+const CANCELLED: &str = "已取消";
+
+fn user_agent() -> String {
+    format!("Grids/{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Ok(true) for https, Ok(false) for http to this machine, else the UI error.
+fn check_url(url: &str) -> Result<bool, String> {
+    let lower = url.trim().to_ascii_lowercase();
+    if lower.starts_with("https://") && lower.len() > 8 {
+        return Ok(true);
+    }
+    let local = [
+        "http://127.0.0.1:",
+        "http://127.0.0.1/",
+        "http://localhost:",
+        "http://localhost/",
+    ];
+    if local.iter().any(|p| lower.starts_with(p)) {
+        return Ok(false);
+    }
+    Err("只支持 https 地址".into())
+}
+
+fn check_status(code: u32) -> Result<(), String> {
+    match code {
+        200..=299 => Ok(()),
+        403 | 429 => Err(format!(
+            "服务器返回 {code}（可能是访问过于频繁，请稍后再试）"
+        )),
+        404 => Err("服务器返回 404（未找到）".into()),
+        500..=599 => Err(format!("服务器错误 {code}，请稍后再试")),
+        0 => Err("服务器响应无效".into()),
+        n => Err(format!("服务器返回 HTTP {n}")),
+    }
+}
+
+fn too_large(max: usize) -> String {
+    format!("下载内容超过上限（{} MB）", max.div_ceil(1024 * 1024))
+}
+
 /// Drives / volume roots. `/` plus removable mounts on Linux.
 pub fn drives() -> Vec<Drive> {
     imp::drives()
@@ -573,6 +633,132 @@ fn copy_tree(src: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-shot HTTP server on 127.0.0.1: "/r" redirects to "/f", "/f" is
+    /// `body`, "/big" says it is huge, anything else is 404.
+    fn serve(body: Vec<u8>, requests: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..requests {
+                let (s, _) = l.accept().unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut head = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head.push(line.trim_end().to_string());
+                }
+                let path = head
+                    .first()
+                    .and_then(|l| l.split(' ').nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                seen.push(head.join("\n"));
+                let mut s = s;
+                let _ = match path.as_str() {
+                    "/r" => s.write_all(b"HTTP/1.1 302 Found\r\nLocation: /f\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                    "/f" => {
+                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        s.write_all(&body)
+                    }
+                    "/big" => s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n"),
+                    _ => s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                };
+            }
+            seen
+        });
+        (base, h)
+    }
+
+    fn have_http() -> bool {
+        cfg!(windows)
+            || std::process::Command::new("curl")
+                .arg("--version")
+                .output()
+                .is_ok()
+    }
+
+    #[test]
+    fn http_get_local() {
+        use std::sync::atomic::AtomicBool;
+        if !have_http() {
+            eprintln!("no curl: skipped");
+            return;
+        }
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let (base, server) = serve(body.clone(), 5);
+        let no = AtomicBool::new(false);
+        let mut calls = Vec::new();
+        let got = http_get(
+            &format!("{base}/r"),
+            1 << 20,
+            &mut |n, t| calls.push((n, t)),
+            &no,
+        )
+        .unwrap();
+        assert_eq!(got, body);
+        assert_eq!(calls.last().copied(), Some((300_000, Some(300_000))));
+        let e = http_get(&format!("{base}/nothing"), 1 << 20, &mut |_, _| {}, &no).unwrap_err();
+        assert!(e.contains("404"), "{e}");
+        let e = http_get(&format!("{base}/f"), 1000, &mut |_, _| {}, &no).unwrap_err();
+        assert!(e.contains("上限"), "{e}");
+        let e = http_get(&format!("{base}/big"), 1000, &mut |_, _| {}, &no).unwrap_err();
+        assert!(e.contains("上限"), "{e}");
+        let seen = server.join().unwrap();
+        let first = seen.first().unwrap().to_ascii_lowercase();
+        assert!(first.contains("user-agent: grids/"), "{first}");
+        assert!(first.contains("application/vnd.github+json"), "{first}");
+
+        let yes = AtomicBool::new(true);
+        assert_eq!(
+            http_get("https://example.invalid/", 10, &mut |_, _| {}, &yes).unwrap_err(),
+            CANCELLED
+        );
+        assert!(http_get("http://example.com/", 10, &mut |_, _| {}, &no).is_err());
+        assert!(http_get("ftp://x/", 10, &mut |_, _| {}, &no).is_err());
+        // nothing listens on port 1
+        let e = http_get("http://127.0.0.1:1/", 10, &mut |_, _| {}, &no).unwrap_err();
+        println!("refused: {e}");
+        assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn http_get_github() {
+        // real TLS, proxy and redirect handling; the API's rate limit is not a failure
+        use std::sync::atomic::AtomicBool;
+        if !have_http() || std::env::var_os("CI").is_none() {
+            return;
+        }
+        let no = AtomicBool::new(false);
+        match http_get(
+            "https://api.github.com/repos/Joyi-code/grids",
+            1 << 20,
+            &mut |_, _| {},
+            &no,
+        ) {
+            Ok(b) => assert!(String::from_utf8_lossy(&b).contains("\"full_name\"")),
+            Err(e) => {
+                println!("api.github.com: {e}");
+                assert!(e.contains("403") || e.contains("429"), "{e}");
+            }
+        }
+        // github.com answers a 301 to the canonical path: followed over https
+        let r = http_get(
+            "https://github.com/Joyi-code/grids/raw/gpui-rewrite/LICENSE",
+            1 << 20,
+            &mut |_, _| {},
+            &no,
+        );
+        match r {
+            Ok(b) => assert!(String::from_utf8_lossy(&b).contains("MIT")),
+            Err(e) => panic!("redirected download: {e}"),
+        }
+    }
 
     #[test]
     fn new_files_numbered() {
