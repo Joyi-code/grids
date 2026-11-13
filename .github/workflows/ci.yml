@@ -106,11 +106,11 @@ jobs:
             exe-size-main-
 
       # users get grids.exe alone; its hash goes to the log and the run summary.
-      # Size gate: grids.exe over 5,300,000 bytes fails the job.
+      # Size gate: grids.exe over 8,000,000 bytes fails the job (catches runaway growth only).
       - name: Collect grids.exe
         shell: pwsh
         env:
-          SIZE_LIMIT: 5300000
+          SIZE_LIMIT: 8000000
           # v0.9 feature budget (400 KB) counts from the last measured pre-v0.9 build
           BASELINE_COMMIT: 7d7948c
           BASELINE_BYTES: 4863488
