@@ -50,6 +50,32 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
+      # Grids is fully offline: grids.exe must not import any networking DLL
+      - name: Offline check (grids.exe imports)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (!$dumpbin) { throw 'dumpbin.exe not found' }
+          $out = & $dumpbin /nologo /imports target/release/grids.exe
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed ($LASTEXITCODE)" }
+          $dlls = $out | Where-Object { $_ -match '^\s{4}(\S+\.dll)\s*$' } | ForEach-Object { $Matches[1].ToLowerInvariant() } | Sort-Object -Unique
+          "imported DLLs:"; $dlls
+          "## grids.exe imports" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "``$($dlls -join ', ')``" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          $bad = $dlls | Where-Object { $_ -in 'winhttp.dll', 'wininet.dll', 'ws2_32.dll', 'mswsock.dll', 'iphlpapi.dll', 'dnsapi.dll', 'urlmon.dll', 'websocket.dll' }
+          if ($bad) {
+            # show which functions are pulled in, to trace the crate responsible
+            $cur = $null
+            foreach ($line in $out) {
+              if ($line -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1].ToLowerInvariant() }
+              elseif ($cur -in $bad -and $line -match '^\s+[0-9A-F]+\s+(\S+)\s*$') { "  $cur!$($Matches[1])" }
+            }
+            throw "grids.exe imports networking DLLs: $($bad -join ', ')"
+          }
+
       # shell tests drive the real Windows Shell; a dialog waiting for a click must not eat the job
       - name: Test
         timeout-minutes: 15
@@ -143,6 +169,35 @@ jobs:
           '```' >> $env:GITHUB_STEP_SUMMARY
           ($crates -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
+
+  offline:
+    name: Offline check (no networking crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      # Grids never touches the network. smol (GPUI's executor) always re-exports
+      # async-net, a thin std::net wrapper with no HTTP/TLS, so it is tolerated here;
+      # the Windows job's import check proves nothing of it reaches grids.exe.
+      - name: cargo tree deny-list
+        run: |
+          deny='^(reqwest|zed-reqwest|hyper|hyper-util|hyper-rustls|hyper-tls|h2|h3|quinn|ureq|curl|curl-sys|isahc|attohttpc|surf|http-client|gpui_http_client|winhttp|wininet|native-tls|openssl|openssl-sys|rustls|tokio-rustls|rustls-native-certs|webpki-roots|socket2|tokio|tungstenite|async-tungstenite|tokio-tungstenite|trust-dns-resolver|hickory-resolver)$'
+          fail=0
+          for t in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            found=$(cargo tree --locked -e normal,build --target "$t" --prefix none -f '{p}' | awk '{print $1}' | sort -u | grep -E "$deny" || true)
+            if [ -n "$found" ]; then
+              fail=1
+              echo "::error::networking crates for $t: $(echo $found)"
+              for c in $found; do cargo tree --locked -e normal,build --target "$t" -i "$c" | head -8; done
+            else
+              echo "$t: no networking crates"
+            fi
+          done
+          exit $fail
 
   linux:
     name: Linux clippy + tests
