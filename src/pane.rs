@@ -8,6 +8,8 @@ use crate::state::{self, tr};
 use crate::theme::{self, Theme};
 use crate::menu::{Cmd, ContextMenu as MenuView, Glyph, Item, MenuEvent};
 use crate::thumbs;
+use crate::ops::{self, Op};
+use grids_core::journal::OpKind;
 use crate::ui::{TipExt, icon, ui_text};
 use futures::StreamExt;
 use gpui::{prelude::FluentBuilder, *};
@@ -29,7 +31,7 @@ actions!(
         EditAddress, FilterNames, ToggleHidden, SelectAll, CursorUp, CursorDown, PageUp, PageDown, First, Last, SelectUp,
         SelectDown, SelectPageUp, SelectPageDown, SelectFirst, SelectLast, MoveUp, MoveDown, Escape, ContextMenu,
         CopyPath, Properties, CursorLeft, CursorRight, SelectLeft, SelectRight, ViewHuge, ViewLarge, ViewMedium, ViewList,
-        ViewDetails
+        ViewDetails, AddToShelf
     ]
 );
 
@@ -73,6 +75,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f10", ContextMenu, c),
         KeyBinding::new("menu", ContextMenu, c),
         KeyBinding::new("secondary-shift-c", CopyPath, c),
+        KeyBinding::new("secondary-shift-a", AddToShelf, c),
         KeyBinding::new("alt-enter", Properties, c),
         KeyBinding::new("left", CursorLeft, c),
         KeyBinding::new("right", CursorRight, c),
@@ -196,6 +199,8 @@ pub struct PaneView {
     scroll: UniformListScrollHandle,
     list_bounds: Rc<Cell<Bounds<Pixels>>>,
     header_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Width the breadcrumbs had last frame, to fold them from the left.
+    crumbs_w: Rc<Cell<f32>>,
     address: Option<(Entity<TextInput>, Vec<Subscription>)>,
     filter: Option<(Entity<TextInput>, Vec<Subscription>)>,
     rename: Option<RenameState>,
@@ -248,6 +253,7 @@ impl PaneView {
             focus,
             scroll: UniformListScrollHandle::new(),
             list_bounds: Rc::default(),
+            crumbs_w: Rc::default(),
             header_bounds: Rc::default(),
             address: None,
             filter: None,
@@ -626,29 +632,62 @@ impl PaneView {
             cx.emit(PaneEvent::Toast(tr(cx, "文件名不能包含下列字符：\\ / : * ? \" < > |", "A file name can't contain \\ / : * ? \" < > |").into()));
             return;
         }
-        match grids_shell::rename(&r.path, &name) {
-            Ok(_) => {
-                self.load(Some(name), cx);
-                cx.emit(PaneEvent::FsChanged(vec![self.state.path.clone()]));
-            }
-            Err(e) => cx.emit(PaneEvent::Toast(format!("{}{e}", tr(cx, "重命名失败：", "Rename failed: ")))),
-        }
+        let (path, pane, en) = (r.path.clone(), Some(self.index), state::en(cx));
+        let to = name.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move {
+                let r = grids_shell::rename_tracked(&path, &to);
+                if let Ok(items) = &r { ops::log(OpKind::Rename, pane, items) }
+                r
+            }).await;
+            let _ = this.update(cx, |this, cx| match res {
+                Ok(items) => {
+                    if ops::follow_moves(&items, cx) { cx.emit(PaneEvent::Changed) }
+                    this.load(Some(name), cx);
+                    cx.emit(PaneEvent::FsChanged(vec![this.state.path.clone()]));
+                }
+                Err(e) => cx.emit(PaneEvent::Toast(format!("{}{e}", if en { "Rename failed: " } else { "重命名失败：" }))),
+            });
+        }).detach();
     }
 
     fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.refuse_locked(std::slice::from_ref(&self.state.path), cx) { return }
-        let base = tr(cx, "新建文件夹", "New folder");
-        let name = paths::unique_name(&self.state.path, base);
-        match std::fs::create_dir(self.state.path.join(&name)) {
-            Ok(()) => {
-                // Add the folder now so it can be renamed at once; the reload confirms it.
-                if let Ok(list) = listing::read_dir(&self.state.path) {
-                    self.state.set_entries(list, Some(&name));
-                    self.start_rename(window, cx);
+        let base = tr(cx, "新建文件夹", "New folder").to_string();
+        let fail = tr(cx, "无法新建文件夹：", "Cannot create folder: ");
+        self.create_then_rename(OpKind::New, fail, Box::new(move |dir| {
+            let path = dir.join(paths::unique_name(dir, &base));
+            std::fs::create_dir(&path)?;
+            Ok(vec![grids_shell::OpItem { src: path.clone(), dst: Some(path), is_dir: true }])
+        }), window, cx);
+    }
+
+    /// Creates something in this folder on a background thread (and
+    /// journals it), then selects it with its name ready to edit.
+    fn create_then_rename(&mut self, kind: OpKind, fail: &'static str, make: Box<dyn FnOnce(&Path) -> std::io::Result<Vec<grids_shell::OpItem>> + Send>, window: &mut Window, cx: &mut Context<Self>) {
+        let (dir, pane) = (self.state.path.clone(), Some(self.index));
+        cx.spawn_in(window, async move |this, cx| {
+            let res = cx.background_executor().spawn({
+                let dir = dir.clone();
+                async move {
+                    let items = make(&dir)?;
+                    ops::log(kind, pane, &items);
+                    let name = items.first().and_then(|i| i.src.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    Ok::<_, std::io::Error>((name, listing::read_dir(&dir)))
                 }
-            }
-            Err(e) => cx.emit(PaneEvent::Toast(format!("{}{e}", tr(cx, "无法新建文件夹：", "Cannot create folder: ")))),
-        }
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| match res {
+                Ok((name, list)) => {
+                    cx.emit(PaneEvent::FsChanged(vec![dir.clone()]));
+                    // Add it now so it can be renamed at once; the reload confirms it.
+                    if this.state.path == dir && let Ok(list) = list {
+                        this.state.set_entries(list, Some(&name));
+                        this.start_rename(window, cx);
+                    }
+                }
+                Err(e) => cx.emit(PaneEvent::Toast(format!("{fail}{e}"))),
+            });
+        }).detach();
     }
 
     // ---- file operations
@@ -701,19 +740,14 @@ impl PaneView {
         dirs.sort();
         dirs.dedup();
         let en = state::en(cx);
+        let pane = Some(self.index);
         cx.spawn(async move |this, cx| {
-            let res = cx.background_executor().spawn(async move {
-                match (op, dest) {
-                    (Op::Copy, Some(d)) => grids_shell::copy(&paths, &d),
-                    (Op::Move, Some(d)) => grids_shell::move_(&paths, &d),
-                    // Confirmed in our own dialog already: no system prompt.
-                    (Op::Recycle, _) => grids_shell::recycle_confirmed(&paths),
-                    (Op::Delete, _) => grids_shell::delete_confirmed(&paths),
-                    _ => Ok(()),
-                }
-            }).await;
+            let res = cx.background_executor().spawn(async move { ops::run(op, &paths, dest.as_deref(), pane) }).await;
             let _ = this.update(cx, |this, cx| {
-                if let Err(e) = res && e.kind() != std::io::ErrorKind::Interrupted { cx.emit(PaneEvent::Toast(format!("{}{e}", if en { "Operation failed: " } else { "操作失败：" }))) }
+                match res {
+                    Ok(items) => if ops::after_op(op, &items, cx) { cx.emit(PaneEvent::Changed) },
+                    Err(e) => if e.kind() != std::io::ErrorKind::Interrupted { cx.emit(PaneEvent::Toast(format!("{}{e}", if en { "Operation failed: " } else { "操作失败：" }))) },
+                }
                 if !select.is_empty() && dirs.contains(&this.state.path) {
                     this.pending_select = Some(select);
                 }
@@ -776,6 +810,7 @@ impl PaneView {
             v.push(Item::row(t("复制", "Copy"), "copy", "Ctrl+C", Cmd::Copy));
             if let Some(dir) = &folder { v.push(Item::row(t("粘贴到此文件夹", "Paste into folder"), "clipboard-paste", "", Cmd::PasteInto(dir.clone())).enabled(can_paste)) }
             v.push(Item::row(t("复制路径", "Copy as path"), "link", "Ctrl+Shift+C", Cmd::CopyPath));
+            v.push(Item::row(t("添加到暂存架", "Add to shelf"), "inbox", "Ctrl+Shift+A", Cmd::Shelve));
             v.push(Item::row(t("重命名", "Rename"), "pencil", "F2", Cmd::Rename).enabled(one && !ro));
             v.push(Item::row(t("删除", "Delete"), "trash-2", "Delete", Cmd::Delete).enabled(!ro));
             v.push(Item::Sep);
@@ -902,6 +937,7 @@ impl PaneView {
             Cmd::Paste => self.paste(cx),
             Cmd::PasteInto(d) => self.paste_into(d, cx),
             Cmd::CopyPath => self.copy_paths(cx),
+            Cmd::Shelve => self.shelve(cx),
             Cmd::Rename => self.start_rename(window, cx),
             Cmd::Delete => self.ask_delete(false, cx),
             Cmd::Zip => if let Some(p) = first && !self.refuse_locked(std::slice::from_ref(&dir), cx) {
@@ -934,22 +970,31 @@ impl PaneView {
             Cmd::View(v) => self.set_view(v, cx),
             Cmd::NewFolder => self.new_folder(window, cx),
             Cmd::NewFile(_) if self.refuse_locked(std::slice::from_ref(&dir), cx) => {}
-            Cmd::NewFile(ext) => match grids_shell::create_new(&dir, &ext) {
-                Ok(p) => {
-                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if let Ok(list) = listing::read_dir(&dir) {
-                        self.state.set_entries(list, Some(&name));
-                        self.start_rename(window, cx);
-                    }
-                }
-                Err(e) => cx.emit(PaneEvent::Toast(format!("{}{e}", if en { "Cannot create file: " } else { "无法新建文件：" }))),
-            },
+            Cmd::NewFile(ext) => {
+                let fail = if en { "Cannot create file: " } else { "无法新建文件：" };
+                self.create_then_rename(OpKind::New, fail, Box::new(move |dir| grids_shell::create_new_tracked(dir, &ext)), window, cx);
+            }
             Cmd::Terminal => bg(self, Box::new(move || grids_shell::open_terminal(&dir)), cx),
             Cmd::CopyFolderPath => {
                 cx.write_to_clipboard(ClipboardItem::new_string(dir.to_string_lossy().into_owned()));
                 cx.emit(PaneEvent::Toast((if en { "Copied the folder path" } else { "已复制文件夹路径" }).into()));
             }
         }
+    }
+
+    /// Puts the selection on the shelf (allowed in read-only folders too).
+    fn shelve(&mut self, cx: &mut Context<Self>) {
+        let t = self.state.targets();
+        if t.is_empty() { return }
+        let added = state::shelve(cx, &t);
+        cx.emit(PaneEvent::Changed);
+        let msg = match (state::en(cx), added) {
+            (true, 0) => "Already on the shelf".to_string(),
+            (true, n) => format!("Added {n} item(s) to the shelf"),
+            (false, 0) => "已在暂存架上".to_string(),
+            (false, n) => format!("已加入暂存架 {n} 项"),
+        };
+        cx.emit(PaneEvent::Toast(msg));
     }
 
     /// "Copy as path": quoted paths, one per line, as Explorer does.
@@ -1019,12 +1064,14 @@ impl PaneView {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Op {
-    Copy,
-    Move,
-    Recycle,
-    Delete,
+const CHEVRON_W: f32 = 14.;
+const FOLD_W: f32 = 18. + CHEVRON_W;
+
+/// Rough width of a breadcrumb chip (label + padding): CJK about 1em,
+/// other text about 0.62em, rounded up so a fold happens before a cut.
+fn crumb_width(label: &str, size: f32) -> f32 {
+    let em: f32 = label.chars().map(|c| if (c as u32) >= 0x2E80 { 1.0 } else if c.is_ascii_uppercase() || "mwMW".contains(c) { 0.72 } else { 0.58 }).sum();
+    em * size + 8. + 2.
 }
 
 /// Where the filter text matches in `name` (case-insensitive), for highlighting.
@@ -1134,20 +1181,50 @@ impl PaneView {
         } else {
             let crumbs = paths::breadcrumbs(&st.path);
             let n = crumbs.len();
-            let mut row = div().flex().flex_none().items_center();
-            for (i, (label, path)) in crumbs.into_iter().enumerate() {
+            // Fold leading crumbs into "…" until the rest fits; never cut a
+            // label in half. The last crumb (the folder) always stays.
+            let avail = self.crumbs_w.get();
+            let widths: Vec<f32> = crumbs.iter().enumerate().map(|(i, (l, _))| crumb_width(l, if i + 1 == n { 14. } else { 13. }) + if i + 1 == n { 0. } else { CHEVRON_W }).collect();
+            let mut skip = 0;
+            if avail > 0. {
+                let mut total: f32 = widths.iter().sum();
+                while skip + 1 < n && total > avail {
+                    total -= widths[skip];
+                    if skip == 0 { total += FOLD_W }
+                    skip += 1;
+                }
+            }
+            let mut row = div().flex().min_w_0().items_center();
+            if skip > 0 {
+                let parent = crumbs[skip - 1].1.clone();
+                let hidden: String = crumbs[..skip].iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(" › ");
+                row = row.child(
+                    div().id("crumb-fold").flex_none().h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().cursor_pointer()
+                        .text_size(px(13.)).text_color(Theme::text_caption())
+                        .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
+                        .child("…")
+                        .tip(&hidden, None)
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if ev.click_count() < 2 { this.navigate(parent.clone(), cx) } })),
+                ).child(div().mx(px(1.)).flex_none().child(icon("chevron-right", 12., Theme::icon_muted())));
+            }
+            for (i, (label, path)) in crumbs.into_iter().enumerate().skip(skip) {
                 let last = i + 1 == n;
                 row = row.child(
-                    div().id(("crumb", i)).flex_none().h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().whitespace_nowrap().cursor_pointer()
-                        .map(|d| if last { d.text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()) } else { d.text_size(px(13.)).text_color(Theme::text_caption()) })
+                    div().id(("crumb", i)).h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().whitespace_nowrap().cursor_pointer()
+                        .map(|d| if last { d.min_w_0().overflow_hidden().text_ellipsis().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()) } else { d.flex_none().text_size(px(13.)).text_color(Theme::text_caption()) })
                         .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
                         .child(label)
                         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if ev.click_count() < 2 { this.navigate(path.clone(), cx) } })),
                 );
                 if !last { row = row.child(div().mx(px(1.)).flex_none().child(icon("chevron-right", 12., Theme::icon_muted()))) }
             }
+            let crumbs_w = self.crumbs_w.clone();
             // Long paths keep their end (the folder) in view.
-            div().id("crumbs").flex_1().min_w_0().h(px(FIELD_H)).flex().items_center().justify_end().overflow_hidden().cursor_text()
+            div().id("crumbs").relative().flex_1().min_w_0().h(px(FIELD_H)).flex().items_center().overflow_hidden().cursor_text()
+                .child(canvas(move |b, window, _| {
+                    let w = f32::from(b.size.width);
+                    if (crumbs_w.replace(w) - w).abs() > 0.5 { window.request_animation_frame() }
+                }, |_, _, _, _| {}).absolute().size_full())
                 .child(row).child(div().flex_1().min_w(px(12.)))
                 .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
                     cx.stop_propagation();
@@ -1585,6 +1662,7 @@ impl Render for PaneView {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopyPath, _, cx| this.copy_paths(cx)))
+            .on_action(cx.listener(|this, _: &AddToShelf, _, cx| this.shelve(cx)))
             .on_action(cx.listener(|this, _: &Properties, window, cx| this.run_cmd(Cmd::Properties, None, Point::default(), window, cx)))
             .on_action(cx.listener(|this, _: &ContextMenu, window, cx| {
                 let b = this.list_bounds.get();

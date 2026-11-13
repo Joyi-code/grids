@@ -46,6 +46,7 @@ pub enum Cmd {
     Paste,
     PasteInto(PathBuf),
     CopyPath,
+    Shelve,
     Rename,
     Delete,
     Zip,

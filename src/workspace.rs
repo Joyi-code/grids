@@ -2,7 +2,8 @@
 //! layout picker and the status bar. Owns the panes and saves the session.
 
 use crate::input::{InputEvent, TextInput};
-use crate::pane::{PaneEvent, PaneView};
+use crate::ops::{self, Op};
+use crate::pane::{DraggedFiles, PaneEvent, PaneView};
 use crate::state::{self, Shared, tr};
 use crate::theme::{self, Theme};
 use crate::ui::{HEADER_H, TipExt, TitleBarExt, header_icon, icon, popover, ui_text, window_controls};
@@ -12,6 +13,7 @@ use grids_core::layout::{self, Layout};
 use grids_core::session::{Appearance, PaneSave, Session};
 use grids_shell::KnownFolderKind;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -58,6 +60,7 @@ pub fn bind_keys(cx: &mut App) {
 /// Splitter grab area either side of the 1px hairline.
 const GRAB: f32 = 4.;
 const STATUS_H: f32 = 28.;
+const SHELF_H: f32 = 40.;
 const SIDEBAR_MIN: f32 = 180.;
 const SIDEBAR_MAX: f32 = 420.;
 /// quiet-md's sidebar geometry: pills inset 14 from the edge, 30 high with
@@ -131,6 +134,12 @@ pub struct Workspace {
     drives: Vec<grids_shell::Drive>,
     known: Vec<grids_shell::KnownFolder>,
     focus: FocusHandle,
+    /// Shelf entries as last seen on disk: Some(is_dir), None missing.
+    /// Checked on a background thread after changes.
+    shelf_stat: HashMap<PathBuf, Option<bool>>,
+    _shelf_check: Option<Task<()>>,
+    /// A shelf copy / move is running.
+    shelf_busy: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -165,10 +174,14 @@ impl Workspace {
             drives: grids_shell::drives(),
             known: grids_shell::known_folders(),
             focus: cx.focus_handle(),
+            shelf_stat: HashMap::new(),
+            _shelf_check: None,
+            shelf_busy: false,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
         me.set_active(me.active, window, cx);
+        me.recheck_shelf(cx);
         me._subs.push(cx.observe_window_appearance(window, |this, window, cx| { this.apply_theme(window, cx) }));
         me.apply_theme(window, cx);
         // Read the "New" templates now so the first right-click has them.
@@ -188,9 +201,10 @@ impl Workspace {
             PaneEvent::Activated => {
                 if let Some(i) = this.panes.iter().position(|p| p == pane) && i != this.active { this.set_active_only(i, cx) }
             }
-            PaneEvent::Changed => this.schedule_save(cx),
+            PaneEvent::Changed => { this.schedule_save(cx); this.recheck_shelf(cx) }
             PaneEvent::FsChanged(dirs) => {
                 for p in this.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(dirs, cx)) }
+                this.recheck_shelf(cx);
             }
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
             PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
@@ -1093,6 +1107,152 @@ impl Workspace {
             .on_drag(SplitDrag { col, i }, |d, _, _, cx| cx.new(|_| d.clone()))
     }
 
+    // ---- the shelf
+
+    /// Looks at the shelf entries on disk (background), to grey out the
+    /// missing ones and pick folder / file icons.
+    fn recheck_shelf(&mut self, cx: &mut Context<Self>) {
+        let list = state::shared(cx).config.shelf.clone();
+        if list.is_empty() {
+            if !self.shelf_stat.is_empty() { self.shelf_stat.clear(); cx.notify() }
+            return;
+        }
+        self._shelf_check = Some(cx.spawn(async move |this, cx| {
+            let stat = cx.background_executor().spawn(async move {
+                list.into_iter().map(|p| { let s = std::fs::metadata(&p).ok().map(|m| m.is_dir()); (p, s) }).collect::<HashMap<_, _>>()
+            }).await;
+            let _ = this.update(cx, |this, cx| if this.shelf_stat != stat { this.shelf_stat = stat; cx.notify() });
+        }));
+    }
+
+    fn set_shelf(&mut self, f: impl FnOnce(&mut Vec<PathBuf>), cx: &mut Context<Self>) {
+        f(&mut cx.global_mut::<Shared>().config.shelf);
+        self.schedule_save(cx);
+        self.recheck_shelf(cx);
+        cx.notify();
+    }
+
+    /// The shelf's present entries, copied or moved into the active pane's
+    /// folder in one journalled operation; the shelf empties on success.
+    fn shelf_to_pane(&mut self, op: Op, cx: &mut Context<Self>) {
+        if self.shelf_busy { return }
+        let Some(pane) = self.active_pane().cloned() else { return };
+        let dest = pane.read(cx).state.path.clone();
+        if let Some(root) = state::locked_root(cx, &dest) { return self.show_locked(root, cx) }
+        let paths: Vec<PathBuf> = state::shared(cx).config.shelf.iter().filter(|p| self.shelf_stat.get(*p).is_some_and(Option::is_some)).cloned().collect();
+        if paths.is_empty() { return }
+        if op == Op::Move && let Some(root) = state::locked_any(cx, &paths) { return self.show_locked(root, cx) }
+        let mut dirs: Vec<PathBuf> = paths.iter().filter_map(|p| p.parent().map(PathBuf::from)).collect();
+        dirs.push(dest.clone());
+        dirs.sort();
+        dirs.dedup();
+        let idx = Some(self.active);
+        let en = state::en(cx);
+        self.shelf_busy = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { ops::run(op, &paths, Some(&dest), idx) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.shelf_busy = false;
+                match res {
+                    Ok(items) => {
+                        ops::after_op(op, &items, cx);
+                        let n = items.len();
+                        this.set_shelf(|s| s.clear(), cx);
+                        this.show_toast(match (en, op) {
+                            (true, Op::Move) => format!("Moved {n} item(s) from the shelf"),
+                            (true, _) => format!("Copied {n} item(s) from the shelf"),
+                            (false, Op::Move) => format!("已从暂存架移动 {n} 项"),
+                            (false, _) => format!("已从暂存架复制 {n} 项"),
+                        }, cx);
+                    }
+                    Err(e) => if e.kind() != std::io::ErrorKind::Interrupted { this.show_toast(format!("{}{e}", if en { "Operation failed: " } else { "操作失败：" }), cx) },
+                }
+                for p in this.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(&dirs, cx)) }
+            });
+        }).detach();
+    }
+
+    fn render_shelf(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shelf = state::shared(cx).config.shelf.clone();
+        // While files are dragged, an empty shelf shows up as a drop target.
+        let dragging = cx.has_active_drag();
+        if shelf.is_empty() && !dragging { return None }
+        let en = state::en(cx);
+        let t = move |zh: &'static str, e: &'static str| if en { e } else { zh };
+        let dest = self.active_pane().map(|p| p.read(cx).state.path.clone());
+        let dest_locked = dest.as_ref().is_some_and(|d| state::locked_root(cx, d).is_some());
+        let present = shelf.iter().filter(|p| self.shelf_stat.get(*p).is_some_and(Option::is_some)).count();
+        let src_locked = state::locked_any(cx, &shelf).is_some();
+        let can_copy = present > 0 && !dest_locked && !self.shelf_busy;
+        let can_move = can_copy && !src_locked;
+        let mut cards = div().id("shelf-cards").flex_1().min_w_0().h_full().flex().items_center().gap(px(6.)).overflow_x_scroll();
+        for (i, p) in shelf.iter().enumerate() {
+            let name: SharedString = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string_lossy().into_owned()).into();
+            let stat = self.shelf_stat.get(p).copied();
+            let missing = matches!(stat, Some(None));
+            let is_dir = matches!(stat, Some(Some(true)));
+            let ext = grids_core::listing::ext_of(&name);
+            let kind = if is_dir { grids_core::FileKind::Folder } else { grids_core::FileKind::of_ext(&ext) };
+            let glyph = match (!missing).then(|| state::file_icon(p, is_dir, &ext, cx)).flatten() {
+                Some(image) => img(image).size(px(16.)).flex_none().into_any_element(),
+                None => icon(theme::kind_icon(kind), 16., if missing { Theme::text_disabled() } else { theme::kind_color(kind) }).into_any_element(),
+            };
+            let tip = if missing { format!("{}{}", p.display(), t("（已不存在）", " (no longer there)")) } else { p.display().to_string() };
+            let remove = p.clone();
+            let drag = DraggedFiles { paths: vec![p.clone()], from: p.parent().map(PathBuf::from).unwrap_or_default(), label: name.clone() };
+            cards = cards.child(
+                div().id(("shelf-card", i)).group("shelf-card").flex_none().max_w(px(200.)).h(px(28.)).pl(px(8.)).pr(px(4.)).rounded(px(7.)).flex().items_center().gap(px(6.))
+                    .bg(Theme::fill_hover()).border_1().border_color(Theme::line_border())
+                    .hover(|s| s.bg(Theme::fill_hover_strong()))
+                    .when(!missing, |d| d.cursor_grab().on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone())))
+                    .child(glyph)
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.))
+                        .map(|d| if missing { d.text_color(Theme::text_disabled()).line_through() } else { d.text_color(Theme::text()) })
+                        .child(ui_text(name)))
+                    .child(div().id(("shelf-x", i)).flex_none().size(px(18.)).rounded(px(5.)).flex().items_center().justify_center().cursor_pointer()
+                        .hover(|s| s.bg(Theme::fill_pressed()))
+                        .child(icon("x", 12., Theme::icon_muted()))
+                        .tip(t("从暂存架移除", "Remove from shelf"), None)
+                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); let r = remove.clone(); this.set_shelf(move |s| s.retain(|q| q != &r), cx) })))
+                    .tip_label(tip, crate::ui::TipSide::Above),
+            );
+        }
+        if shelf.is_empty() {
+            cards = cards.child(div().text_size(px(12.)).text_color(Theme::text_caption()).child(t("拖到这里加入暂存架", "Drop here to add to the shelf")));
+        }
+        let action = |id: &'static str, glyph: &'static str, label: &'static str, enabled: bool| {
+            div().id(id).flex_none().h(px(26.)).px(px(8.)).rounded(px(6.)).flex().items_center().gap(px(5.)).text_size(px(12.)).whitespace_nowrap()
+                .map(|d| if enabled {
+                    d.cursor_pointer().text_color(Theme::text()).hover(|s| s.bg(Theme::fill_hover_strong())).active(|s| s.bg(Theme::fill_pressed()))
+                } else { d.text_color(Theme::text_disabled()) })
+                .child(icon(glyph, 14., if enabled { Theme::icon() } else { Theme::text_disabled() }))
+                .child(label)
+        };
+        let blocked: Option<&'static str> = if dest_locked { Some(t("当前格子是只读文件夹", "The active pane's folder is read-only")) } else { None };
+        let move_tip = blocked.or(src_locked.then(|| t("暂存架上有只读文件夹里的项目，只能复制", "Some items are in a read-only folder: copy only")));
+        Some(
+            div().id("shelf").h(px(SHELF_H)).flex_none().flex().items_center().gap(px(8.)).pl(px(12.)).pr(px(10.))
+                .border_t_1().border_color(Theme::line_divider())
+                .map(|d| if dragging { d.bg(Theme::drop_target()) } else { d })
+                .on_drop(cx.listener(|this, d: &DraggedFiles, _, cx| { let p = d.paths.clone(); this.set_shelf(move |s| { for x in p { if !s.contains(&x) { s.push(x) } } }, cx) }))
+                .on_drop(cx.listener(|this, d: &ExternalPaths, _, cx| { let p = d.paths().to_vec(); this.set_shelf(move |s| { for x in p { if !s.contains(&x) { s.push(x) } } }, cx) }))
+                .child(div().flex_none().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(Theme::text_caption())
+                    .child(icon("inbox", 15., Theme::icon_muted()))
+                    .child(if shelf.is_empty() { t("暂存架", "Shelf").to_string() } else if en { format!("Shelf · {}", shelf.len()) } else { format!("暂存架 · {}", shelf.len()) }))
+                .child(cards)
+                .child(action("shelf-copy", "copy", t("复制到当前格子", "Copy here"), can_copy)
+                    .when_some(blocked, |d, why| d.tip(why, None))
+                    .when(can_copy, |d| d.on_click(cx.listener(|this, _, _, cx| this.shelf_to_pane(Op::Copy, cx)))))
+                .child(action("shelf-move", "folder-input", t("移动到当前格子", "Move here"), can_move)
+                    .when_some(move_tip, |d, why| d.tip(why, None))
+                    .when(can_move, |d| d.on_click(cx.listener(|this, _, _, cx| this.shelf_to_pane(Op::Move, cx)))))
+                .child(action("shelf-clear", "trash-2", t("清空", "Clear"), !shelf.is_empty())
+                    .when(!shelf.is_empty(), |d| d.tip(t("清空暂存架（不删除文件）", "Empty the shelf (files stay)"), None).on_click(cx.listener(|this, _, _, cx| this.set_shelf(|s| s.clear(), cx)))))
+                .into_any_element(),
+        )
+    }
+
     fn render_status(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = state::lang(cx);
         let en = lang == format::Lang::En;
@@ -1209,6 +1369,7 @@ impl Render for Workspace {
                 div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body())
                     .child(self.render_topbar(window, cx))
                     .child(self.render_grid(cx))
+                    .children(self.render_shelf(cx))
                     .child(self.render_status(window, cx)),
             )
             .children(self.render_picker(cx))

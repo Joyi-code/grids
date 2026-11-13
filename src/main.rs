@@ -5,6 +5,7 @@ mod app_icon;
 mod assets;
 mod input;
 mod menu;
+mod ops;
 mod pane;
 mod state;
 mod theme;
@@ -15,12 +16,14 @@ mod workspace;
 use gpui::*;
 use grids_core::format::Lang;
 use grids_core::Config;
+use std::path::Path;
 
 fn main() {
     install_crash_log();
     env_logger_lite();
     let path = Config::default_path();
     let mut config = Config::load(&path);
+    ops::init(path.parent().map(Path::to_path_buf).unwrap_or_default());
     // Simplified Chinese by default; GRIDS_LANG=en switches to English.
     if let Some(l) = std::env::var_os("GRIDS_LANG") { config.lang = if l == "en" { Lang::En } else { Lang::Zh } }
     let (w, h) = config.window.unwrap_or((1360., 860.));

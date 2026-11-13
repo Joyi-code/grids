@@ -41,6 +41,15 @@ pub fn locked_root(cx: &App, path: &Path) -> Option<PathBuf> {
 pub fn locked_any(cx: &App, paths: &[PathBuf]) -> Option<PathBuf> {
     paths.iter().find_map(|p| locked_root(cx, p))
 }
+/// Adds `paths` to the shelf (no duplicates); returns how many were new.
+pub fn shelve(cx: &mut App, paths: &[PathBuf]) -> usize {
+    let shelf = &mut cx.global_mut::<Shared>().config.shelf;
+    let mut n = 0;
+    for p in paths {
+        if !shelf.iter().any(|s| grids_core::link::same_path(s, p)) { shelf.push(p.clone()); n += 1 }
+    }
+    n
+}
 /// The string for the interface language.
 pub fn tr(cx: &App, zh: &'static str, en: &'static str) -> &'static str { if self::en(cx) { en } else { zh } }
 
