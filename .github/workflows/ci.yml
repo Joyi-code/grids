@@ -58,25 +58,65 @@ jobs:
       - name: Clippy (Windows platform layer)
         run: cargo clippy --release --locked -p grids_shell --all-targets
 
+      # users get grids.exe alone; its hash goes to the log and the run summary
       - name: Collect grids.exe
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
+          New-Item -ItemType Directory -Force dist, symbols | Out-Null
           Copy-Item target/release/grids.exe dist/grids.exe
-          # symbols for crash backtraces (release has debug = "line-tables-only")
-          if (Test-Path target/release/grids.pdb) { Copy-Item target/release/grids.pdb dist/grids.pdb }
-          Copy-Item LICENSE dist/
-          if (Test-Path THIRD_PARTY.md) { Copy-Item THIRD_PARTY.md dist/ }
-          (Get-FileHash dist/grids.exe -Algorithm SHA256).Hash | Out-File dist/grids.exe.sha256 -Encoding ascii
-          Get-ChildItem dist
+          if (Test-Path target/release/grids.pdb) { Copy-Item target/release/grids.pdb symbols/grids.pdb }
+          $exe = Get-Item dist/grids.exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "grids.exe  $($exe.Length) bytes  SHA256 $hash"
+          "## grids.exe" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| | |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Size | $($exe.Length) bytes ($([math]::Round($exe.Length / 1MB, 2)) MiB) |" >> $env:GITHUB_STEP_SUMMARY
+          "| SHA256 | ``$hash`` |" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload grids.exe
         uses: actions/upload-artifact@v5
         with:
           name: grids-windows-x64
-          path: dist/*
+          path: dist/grids.exe
           if-no-files-found: error
           retention-days: 30
+
+      # crash-log backtraces resolve lines against this (release keeps line tables)
+      - name: Upload symbols
+        uses: actions/upload-artifact@v5
+        with:
+          name: grids-windows-x64-symbols
+          path: symbols/grids.pdb
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # size report only: never fails the build
+      - name: Install cargo-bloat
+        continue-on-error: true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bloat
+
+      - name: Size report (cargo bloat)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # same profile and flags as the build above, so cargo reuses it instead of rebuilding
+          $fns = cargo bloat --release --locked --bin grids -n 30 2>&1 | Out-String
+          $crates = cargo bloat --release --locked --bin grids --crates -n 30 2>&1 | Out-String
+          $fns
+          $crates
+          "## Size: largest functions" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          $fns.TrimEnd() >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          "## Size: by crate" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          $crates.TrimEnd() >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
 
   linux:
     name: Linux clippy + tests
