@@ -237,11 +237,12 @@ pub const CJK_PUNCT_FONT: &str = "PingFang SC";
 /// caches its first, unconstrained measurement when nowrap).
 pub struct UiText {
     text: SharedString,
-    hit: Option<(std::ops::Range<usize>, Hsla)>,
+    hits: Vec<std::ops::Range<usize>>,
+    hit_color: Option<Hsla>,
 }
 
 pub fn ui_text(text: impl Into<SharedString>) -> UiText {
-    UiText { text: text.into(), hit: None }
+    UiText { text: text.into(), hits: Vec::new(), hit_color: None }
 }
 
 pub struct UiTextLayout {
@@ -254,15 +255,20 @@ pub struct UiTextLayout {
 
 impl UiText {
     pub fn hit(mut self, range: Option<std::ops::Range<usize>>, color: Hsla) -> Self {
-        self.hit = range.map(|r| (r, color));
+        self.hits = range.into_iter().collect();
+        self.hit_color = Some(color);
+        self
+    }
+
+    /// Several colored ranges (fuzzy-match hits).
+    pub fn hits(mut self, ranges: Vec<std::ops::Range<usize>>, color: Hsla) -> Self {
+        self.hits = ranges;
+        self.hit_color = Some(color);
         self
     }
 
     fn runs(&self, style: &TextStyle) -> Vec<TextRun> {
-        match &self.hit {
-            Some((r, c)) => ui_runs(&self.text, style, std::slice::from_ref(r), *c),
-            None => ui_runs(&self.text, style, &[], style.color),
-        }
+        ui_runs(&self.text, style, &self.hits, self.hit_color.unwrap_or(style.color))
     }
 }
 

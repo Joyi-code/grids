@@ -18,14 +18,18 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+mod palette;
+
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette]
 );
 
 pub fn bind_keys(cx: &mut App) {
+    palette::bind_keys(cx);
     let c = Some("Workspace");
     cx.bind_keys([
+        KeyBinding::new("secondary-k", CommandPalette, c),
         KeyBinding::new("ctrl-tab", NextPane, c),
         KeyBinding::new("ctrl-shift-tab", PrevPane, c),
         KeyBinding::new("secondary-1", Pane1, c),
@@ -149,6 +153,7 @@ pub struct Workspace {
     /// A shelf copy / move is running.
     shelf_busy: bool,
     note_edit: Option<NoteEdit>,
+    palette: Option<palette::Palette>,
     _subs: Vec<Subscription>,
 }
 
@@ -187,6 +192,7 @@ impl Workspace {
             _shelf_check: None,
             shelf_busy: false,
             note_edit: None,
+            palette: None,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -1454,6 +1460,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SwapUp, w, cx| this.swap_pane(0, -1, w, cx)))
             .on_action(cx.listener(|this, _: &SwapDown, w, cx| this.swap_pane(0, 1, w, cx)))
             .on_action(cx.listener(|this, _: &CycleTheme, window, cx| this.cycle_theme(window, cx)))
+            .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(window, cx)))
             .on_drag_move::<SplitDrag>(cx.listener(|this, ev: &DragMoveEvent<SplitDrag>, _, cx| {
                 let d = ev.drag(cx).clone();
                 let b = this.grid_bounds.get();
@@ -1495,6 +1502,7 @@ impl Render for Workspace {
             .children(self.render_about(window, cx))
             .children(self.render_confirm(cx))
             .children(self.render_note_edit(cx))
+            .children(self.render_palette(cx))
     }
 }
 

@@ -306,6 +306,11 @@ impl PaneView {
                 this.loading = false;
                 match res {
                     Ok(entries) => {
+                        if this.listed.as_deref() != Some(path.as_path()) {
+                            // A folder entered successfully: the palette's recent list.
+                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+                            grids_core::frecency::visit(&mut cx.global_mut::<state::Shared>().config.recent, &path, now);
+                        }
                         this.note_changes(&path, live, &entries);
                         this.state.set_entries(entries, select.as_deref());
                         let mut jump = select.is_some();
@@ -324,12 +329,15 @@ impl PaneView {
     /// names start fading highlights (up to `FRESH_MAX` of them; more, as
     /// when unpacking an archive, only count) and, while the pane is not
     /// active, add to its +N badge.
-    fn note_changes(&mut self, path: &Path, live: bool, entries: &[Entry]) {
+    /// True when a live reload found changes.
+    fn note_changes(&mut self, path: &Path, live: bool, entries: &[Entry]) -> bool {
         let same = self.listed.as_deref() == Some(path);
         if !same { self.fresh.clear() }
+        let mut changed = false;
         if live && same {
             let ch = grids_core::diff::diff_entries(&self.prev, entries);
             if !ch.is_empty() {
+                changed = true;
                 if !self.active { self.unseen += ch.len() }
                 if ch.len() <= FRESH_MAX {
                     let now = Instant::now();
@@ -339,6 +347,7 @@ impl PaneView {
         }
         self.prev = entries.to_vec();
         self.listed = Some(path.to_path_buf());
+        changed
     }
 
     /// The accent wash over a changed entry: 18 % fading to 0 over `FRESH`.
