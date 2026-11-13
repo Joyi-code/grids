@@ -55,7 +55,7 @@ Get `grids.exe` from [Releases](https://github.com/efww/grids/releases), put it 
 
 The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
 
-**Requirements**: Windows 10 (1903 or later) or Windows 11, x64.
+**Requirements**: Windows 10 (1903 or later) or Windows 11, x64. Nothing else needs installing: the C runtime is built into `grids.exe` (no Visual C++ Redistributable), and the only other DLLs it loads ship with Windows, including `icuuc.dll` (Windows' own ICU, used by GPUI), which is why 1903 is the minimum.
 
 ## Keyboard shortcuts
 

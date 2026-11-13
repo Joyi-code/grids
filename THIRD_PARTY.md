@@ -42,6 +42,22 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## System components (not bundled)
+
+`grids.exe` is self-contained: the Rust standard library and the Microsoft C
+runtime (vcruntime and the Universal CRT) are linked statically
+(`.cargo/config.toml`, `+crt-static`), so no Visual C++ Redistributable is
+needed. CI fails if the exe imports any `vcruntime*`, `msvcp*` or
+`api-ms-win-crt-*` DLL, or any networking DLL.
+
+Every DLL it still imports is part of Windows. The one that sets the minimum
+version is `icuuc.dll`, Windows' own copy of ICU (Unicode, ICU licence,
+shipped with Windows 10 since 1703): GPUI's Windows backend calls
+`u_strlen` from it (`vendor/gpui/src/platform/windows/destination_list.rs`,
+via the `windows` crate's `Win32_Globalization`). Together with the
+DirectComposition / DirectWrite APIs GPUI uses, Grids requires
+**Windows 10 version 1903 or later, or Windows 11, x64**.
+
 ## GPUI (Apache-2.0)
 
 Copyright Zed Industries, Inc. https://github.com/zed-industries/zed

@@ -1,0 +1,6 @@
+# grids.exe runs without installing anything: link the C runtime (vcruntime
+# and the Universal CRT) statically, so a clean Windows without the
+# Visual C++ Redistributable still starts it. CI's dumpbin step checks that
+# no vcruntime*/msvcp*/api-ms-win-crt-* import remains.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

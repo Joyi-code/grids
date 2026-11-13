@@ -65,6 +65,17 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "``$($dlls -join ', ')``" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
+          # Grids needs no install: the C runtime is linked statically (.cargo/config.toml)
+          $crt = $dlls | Where-Object { $_ -like 'vcruntime*.dll' -or $_ -like 'msvcp*.dll' -or $_ -like 'api-ms-win-crt-*' -or $_ -like 'ucrtbase*.dll' -or $_ -like 'msvcr*.dll' }
+          if ($crt) {
+            # name the functions, to trace the crate or object that still wants the DLL CRT
+            $cur = $null
+            foreach ($line in $out) {
+              if ($line -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1].ToLowerInvariant() }
+              elseif ($cur -in $crt -and $line -match '^\s+[0-9A-F]+\s+(\S+)\s*$') { "  $cur!$($Matches[1])" }
+            }
+            throw "grids.exe imports the C runtime DLLs (a clean Windows may lack them): $($crt -join ', ')"
+          }
           $bad = $dlls | Where-Object { $_ -in 'winhttp.dll', 'wininet.dll', 'ws2_32.dll', 'mswsock.dll', 'iphlpapi.dll', 'dnsapi.dll', 'urlmon.dll', 'websocket.dll' }
           if ($bad) {
             # show which functions are pulled in, to trace the crate responsible
