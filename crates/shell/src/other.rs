@@ -3,8 +3,8 @@
 //! native context menu.
 
 use crate::{
-    Drive, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, RgbaImage, classify_target,
-    copy_tree, free_copy_name, is_within,
+    Drive, Handler, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, NewItem, RgbaImage,
+    classify_target, copy_tree, create_numbered, free_copy_name, is_within, new_base_name,
 };
 use std::io;
 use std::path::{Path, PathBuf};
@@ -371,6 +371,94 @@ pub fn same_volume(a: &Path, b: &Path) -> bool {
     {
         a.components().next() == b.components().next()
     }
+}
+
+// ---------- open with / new / terminal / zip ----------
+
+fn unsupported(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, format!("{what}: Windows only"))
+}
+
+pub fn open_with_handlers(_path: &Path) -> Vec<Handler> {
+    Vec::new()
+}
+
+pub fn open_with(_path: &Path, _handler_id: &str) -> io::Result<()> {
+    Err(unsupported("open with"))
+}
+
+pub fn open_with_dialog(_hwnd: isize, _path: &Path) -> io::Result<()> {
+    Err(unsupported("choose another app"))
+}
+
+pub fn properties(_hwnd: isize, _paths: &[PathBuf]) -> io::Result<()> {
+    Err(unsupported("properties"))
+}
+
+const TXT_NAME: &str = "文本文档";
+
+pub fn new_items() -> Vec<NewItem> {
+    vec![NewItem {
+        ext: ".txt".into(),
+        name: TXT_NAME.into(),
+        icon: None,
+    }]
+}
+
+/// Any extension gives an empty file; `.txt` is named "新建 文本文档.txt".
+pub fn create_new(dir: &Path, ext: &str) -> io::Result<PathBuf> {
+    let ext = crate::norm_ext(ext)?;
+    let type_name = if ext == ".txt" {
+        TXT_NAME.to_string()
+    } else {
+        format!("{} 文件", ext.trim_start_matches('.').to_uppercase())
+    };
+    create_numbered(dir, &new_base_name(&type_name), &ext, &[])
+}
+
+fn on_path(cmd: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
+}
+
+pub fn open_terminal(dir: &Path) -> io::Result<()> {
+    let start = |cmd: &str| {
+        Command::new(cmd)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+    };
+    if cfg!(target_os = "macos") {
+        return spawn(
+            "open",
+            &["-a".as_ref(), "Terminal".as_ref(), dir.as_os_str()],
+        );
+    }
+    let from_env = std::env::var("TERMINAL")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no terminal emulator found");
+    for cmd in from_env.iter().map(String::as_str).chain([
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "kitty",
+        "alacritty",
+        "xterm",
+    ]) {
+        if !cmd.contains('/') && !on_path(cmd) {
+            continue;
+        }
+        match start(cmd) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 #[cfg(test)]

@@ -41,6 +41,8 @@ mod other;
 #[cfg(not(windows))]
 use other as imp;
 
+mod zip;
+
 /// A mounted drive / volume root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Drive {
@@ -77,6 +79,29 @@ pub enum LinkTarget {
     /// No file system target: an item-ID-only shortcut (Control Panel,
     /// `shell:` locations, ...).
     Other,
+}
+
+/// A program offered under "打开方式" (Open with) for a file type.
+#[derive(Clone, Debug)]
+pub struct Handler {
+    /// Stable key to pass back to [`open_with`] (the handler's name as the
+    /// shell reports it: an exe path, or an app ID for Store apps).
+    pub id: String,
+    /// Display name, e.g. "记事本".
+    pub name: String,
+    /// The program's icon, about 32 px; `None` when it could not be read.
+    pub icon: Option<Arc<RgbaImage>>,
+}
+
+/// A file type Explorer offers under "新建" (New).
+#[derive(Clone, Debug)]
+pub struct NewItem {
+    /// Extension with the dot, e.g. ".docx".
+    pub ext: String,
+    /// Localized type name, e.g. "Microsoft Word 文档" / "文本文档".
+    pub name: String,
+    /// The type's icon (32 px list); `None` off Windows.
+    pub icon: Option<Arc<RgbaImage>>,
 }
 
 /// What the user did in a native context menu.
@@ -220,6 +245,105 @@ pub fn rename(path: &Path, new_name: &str) -> io::Result<PathBuf> {
     Ok(to)
 }
 
+/// Programs recommended for opening `path` (SHAssocEnumHandlers,
+/// ASSOC_FILTER_RECOMMENDED), the current default first, de-duplicated.
+/// Empty on failure and off Windows. Reads the registry and program icons:
+/// call from a background thread.
+pub fn open_with_handlers(path: &Path) -> Vec<Handler> {
+    imp::open_with_handlers(path)
+}
+
+/// Opens `path` with the handler whose [`Handler::id`] is `handler_id`
+/// (IAssocHandler::Invoke on the file's data object). `Err` with the
+/// system's reason; `NotFound` when no such handler exists for the type.
+/// Background thread.
+pub fn open_with(path: &Path, handler_id: &str) -> io::Result<()> {
+    imp::open_with(path, handler_id)
+}
+
+/// Explorer's "选择其他应用" (Choose another app) dialog for `path`
+/// (SHOpenWithDialog: the chosen program opens the file, and "always use"
+/// can make it the default). Modal: call on the UI thread outside any
+/// `cx.update` borrow, like the context menus. `Interrupted` when the user
+/// cancels; `Unsupported` off Windows.
+pub fn open_with_dialog(hwnd: isize, path: &Path) -> io::Result<()> {
+    imp::open_with_dialog(hwnd, path)
+}
+
+/// The system Properties sheet for one item (SHObjectProperties) or several
+/// (SHMultiFileProperties, items from one folder). Non-modal: returns once
+/// the sheet is up. UI thread, outside any borrow. `Unsupported` off Windows.
+pub fn properties(hwnd: isize, paths: &[PathBuf]) -> io::Result<()> {
+    imp::properties(hwnd, paths)
+}
+
+/// File types under Explorer's "新建" menu (`HKCR\.ext[\ProgID]\ShellNew`
+/// with NullFile, FileName or Data; Command / Handler entries are left
+/// out), sorted by name; `.txt` is always there. Folders are not included.
+/// Cached for a short while; first call reads the registry, so call from a
+/// background thread. Off Windows just `.txt`.
+pub fn new_items() -> Vec<NewItem> {
+    imp::new_items()
+}
+
+/// Creates a new file of type `ext` (".docx") in `dir` from its ShellNew
+/// entry (NullFile: empty; Data: those bytes; FileName: copy of the
+/// template) named like Explorer's ("新建 文本文档.txt", then
+/// "新建 文本文档 (2).txt"), never overwriting. Returns the new path.
+pub fn create_new(dir: &Path, ext: &str) -> io::Result<PathBuf> {
+    imp::create_new(dir, ext)
+}
+
+/// Opens a terminal in `dir`: Windows Terminal (`wt -d`) when installed,
+/// else PowerShell, else cmd. Elsewhere `$TERMINAL`, then
+/// x-terminal-emulator and common terminals. Returns once started.
+pub fn open_terminal(dir: &Path) -> io::Result<()> {
+    imp::open_terminal(dir)
+}
+
+/// Zips `paths` (files and folders from one folder) into `dest_zip`, which
+/// must not exist yet. Built in (deflate, UTF-8 names, no ZIP64: over 4 GB
+/// is refused); symlinks and junctions inside folders are skipped. Blocks
+/// until done: background thread. A failed archive is removed.
+pub fn compress_zip(paths: &[PathBuf], dest_zip: &Path) -> io::Result<()> {
+    if paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nothing to compress",
+        ));
+    }
+    if std::fs::symlink_metadata(dest_zip).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", dest_zip.display()),
+        ));
+    }
+    let parent = paths
+        .first()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent folder"))?;
+    if !paths.iter().all(|p| parent_is(p, parent)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "items to compress must come from one folder",
+        ));
+    }
+    let items: Vec<(String, &Path)> = paths
+        .iter()
+        .filter_map(|p| Some((p.file_name()?.to_string_lossy().into_owned(), p.as_path())))
+        .collect();
+    let dest = if dest_zip.is_absolute() {
+        dest_zip.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dest_zip)
+    };
+    let result = zip::write(&dest, &items);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&dest); // no half-written archive (create_new: never someone else's)
+    }
+    result
+}
+
 /// Drives / volume roots. `/` plus removable mounts on Linux.
 pub fn drives() -> Vec<Drive> {
     imp::drives()
@@ -298,6 +422,55 @@ pub fn check_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Creates `dir/<base><ext>`, or "<base> (2)<ext>", "(3)", ... when taken,
+/// atomically (create_new), writes `contents` and returns the path.
+fn create_numbered(dir: &Path, base: &str, ext: &str, contents: &[u8]) -> io::Result<PathBuf> {
+    use std::io::Write;
+    check_name(&format!("{base}{ext}"))?;
+    for n in 1..10_000u32 {
+        let name = if n == 1 {
+            format!("{base}{ext}")
+        } else {
+            format!("{base} ({n}){ext}")
+        };
+        let path = dir.join(&name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(contents) {
+                    drop(f);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e);
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free name"))
+}
+
+/// ".docx" from ".docx", "docx" or ".DOCX"; rejects empty / path-like input.
+fn norm_ext(ext: &str) -> io::Result<String> {
+    let e = ext.trim().trim_start_matches('.').to_lowercase();
+    if e.is_empty() || check_name(&e).is_err() || e.contains('.') && e.ends_with('.') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid extension: {ext:?}"),
+        ));
+    }
+    Ok(format!(".{e}"))
+}
+
+/// "新建 {type}" for a type name.
+fn new_base_name(type_name: &str) -> String {
+    format!("新建 {type_name}")
+}
+
 /// Folder / File / Missing for a target path; Other when it is empty.
 fn classify_target(target: &str) -> LinkTarget {
     if target.is_empty() {
@@ -367,6 +540,92 @@ fn copy_tree(src: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_files_numbered() {
+        let d = std::env::temp_dir().join(format!("grids_new_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(
+            new_items()
+                .iter()
+                .any(|i| i.ext == ".txt" && !i.name.is_empty())
+        );
+        let a = create_new(&d, ".txt").unwrap();
+        let b = create_new(&d, "txt").unwrap();
+        assert!(a.is_file() && b.is_file() && a != b, "{a:?} {b:?}");
+        let (na, nb) = (
+            a.file_name().unwrap().to_string_lossy().into_owned(),
+            b.file_name().unwrap().to_string_lossy().into_owned(),
+        );
+        assert!(na.ends_with(".txt") && !na.contains("(2)"), "{na}");
+        assert_eq!(nb, na.replace(".txt", " (2).txt"));
+        assert!(create_new(&d, "").is_err());
+        assert!(create_new(&d, "../x").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn zip_readable() {
+        // for an outside reader: GRIDS_ZIP_KEEP=dir keeps the archive there
+        let d = std::env::temp_dir().join(format!("grids_zip2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("文件夹 1").join("空")).unwrap();
+        std::fs::write(d.join("报告.txt"), "你好 Grids\n".repeat(1000)).unwrap();
+        std::fs::write(
+            d.join("文件夹 1").join("b.bin"),
+            (0..=255u8).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        std::fs::write(d.join("empty.txt"), "").unwrap();
+        let out = d.join("out.zip");
+        compress_zip(
+            &[d.join("报告.txt"), d.join("文件夹 1"), d.join("empty.txt")],
+            &out,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(bytes.starts_with(b"PK\x03\x04"));
+        assert!(bytes.len() < 2000, "not compressed: {}", bytes.len());
+        if let Some(keep) = std::env::var_os("GRIDS_ZIP_KEEP") {
+            std::fs::copy(&out, std::path::Path::new(&keep).join("grids_test.zip")).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn zip_arguments_checked() {
+        let d = std::env::temp_dir().join(format!("grids_zip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("a.txt"), "a").unwrap();
+        std::fs::write(d.join("sub").join("b.txt"), "b").unwrap();
+        assert!(compress_zip(&[], &d.join("x.zip")).is_err());
+        // items from two folders
+        assert!(
+            compress_zip(
+                &[d.join("a.txt"), d.join("sub").join("b.txt")],
+                &d.join("x.zip")
+            )
+            .is_err()
+        );
+        std::fs::write(d.join("taken.zip"), "z").unwrap();
+        assert_eq!(
+            compress_zip(&[d.join("a.txt")], &d.join("taken.zip"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        // the real thing; the content is checked by zip_readable below
+        match compress_zip(&[d.join("a.txt"), d.join("sub")], &d.join("out.zip")) {
+            Ok(()) => {
+                let bytes = std::fs::read(d.join("out.zip")).unwrap();
+                assert!(bytes.starts_with(b"PK"), "not a zip");
+            }
+            Err(e) => panic!("{e}"),
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn copy_names() {

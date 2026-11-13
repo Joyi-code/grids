@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    ERROR_NO_ASSOCIATION, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT,
-    RPC_E_CHANGED_MODE, WPARAM,
+    ERROR_CANCELLED, ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE,
+    HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -26,7 +26,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile, STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IDataObject, IPersistFile,
+    STGM_READ,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
@@ -39,22 +40,32 @@ use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CLASSES_ROOT, KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND,
+    RRF_RT_ANY, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
+};
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
+    ASSOC_FILTER, ASSOC_FILTER_NONE, ASSOC_FILTER_RECOMMENDED, ASSOCF_NOTRUNCATE, ASSOCSTR,
+    ASSOCSTR_EXECUTABLE, ASSOCSTR_FRIENDLYDOCNAME, AssocQueryStringW, BHID_DataObject,
     BHID_SFUIObject, CFSTR_PREFERREDDROPEFFECT, CMF_CANRENAME, CMF_EXTENDEDVERBS, CMF_NORMAL,
     CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, DROPFILES, DragQueryFileW,
     FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
-    FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE, FOLDERID_Desktop,
-    FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile, FileOperation,
-    GCS_VERBW, HDROP, IContextMenu, IContextMenu2, IContextMenu3, IFileOperation, ILFree,
-    IShellFolder, IShellItem, IShellItemArray, IShellLinkW, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI,
-    SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromIDLists, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_SYSICONINDEX,
-    SHGFI_USEFILEATTRIBUTES, SHGetDesktopFolder, SHGetFileInfoW, SHGetImageList,
-    SHGetKnownFolderPath, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL,
-    SHOpenFolderAndSelectItems, SHParseDisplayName, SLGP_RAWPATH, ShellExecuteExW, ShellLink,
+    FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE, FOLDERID_CommonTemplates,
+    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile,
+    FOLDERID_Templates, FileOperation, GCS_VERBW, HDROP, IAssocHandler, IContextMenu,
+    IContextMenu2, IContextMenu3, IFileOperation, ILFree, IShellFolder, IShellItem,
+    IShellItemArray, IShellLinkW, KF_FLAG_DEFAULT, OAIF_ALLOW_REGISTRATION, OAIF_EXEC,
+    OAIF_REGISTER_EXT, OPENASINFO, SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC,
+    SHAssocEnumHandlers, SHCNE_CREATE, SHCNF_PATHW, SHChangeNotify, SHCreateItemFromParsingName,
+    SHCreateShellItemArrayFromIDLists, SHDefExtractIconW, SHELLEXECUTEINFOW, SHFILEINFOW,
+    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetDesktopFolder, SHGetFileInfoW,
+    SHGetImageList, SHGetKnownFolderPath, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL,
+    SHLoadIndirectString, SHMultiFileProperties, SHOP_FILEPATH, SHObjectProperties,
+    SHOpenFolderAndSelectItems, SHOpenWithDialog, SHParseDisplayName, SLGP_RAWPATH,
+    ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
@@ -171,7 +182,7 @@ fn no_association(e: &windows::core::Error) -> bool {
 }
 
 /// `openas`: on "no program for this type", show the Open-with dialog.
-fn open_with(path: &Path, openas: bool) -> io::Result<()> {
+fn open_default(path: &Path, openas: bool) -> io::Result<()> {
     ensure_com();
     let file = wide(path);
     let dir = path.parent().map(wide).unwrap_or_default();
@@ -206,7 +217,7 @@ fn open_with(path: &Path, openas: bool) -> io::Result<()> {
 /// reason); only "no program for this type" falls back to the Open-with
 /// dialog. Blocks; safe on any thread (STA COM per thread).
 pub fn open_with_system(path: &Path) -> io::Result<()> {
-    open_with(path, true)
+    open_default(path, true)
 }
 
 // ---------- shortcuts ----------
@@ -985,6 +996,557 @@ pub fn same_volume(a: &Path, b: &Path) -> bool {
     }
 }
 
+// ---------- open with ----------
+
+/// A CoTaskMem string as a String, freed.
+unsafe fn take_pwstr(p: PWSTR) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let s = unsafe { p.to_string() }.unwrap_or_default();
+    unsafe { CoTaskMemFree(Some(p.0 as _)) };
+    s
+}
+
+/// ".txt" for a path; None without an extension.
+fn dot_ext(path: &Path) -> Option<String> {
+    let e = path.extension()?.to_string_lossy().to_lowercase();
+    (!e.is_empty()).then(|| format!(".{e}"))
+}
+
+fn assoc_string(kind: ASSOCSTR, assoc: &str) -> Option<String> {
+    let src = HSTRING::from(assoc);
+    let mut buf = vec![0u16; 1024];
+    let mut len = buf.len() as u32;
+    let hr = unsafe {
+        AssocQueryStringW(
+            ASSOCF_NOTRUNCATE,
+            kind,
+            &src,
+            PCWSTR::null(),
+            Some(PWSTR(buf.as_mut_ptr())),
+            &mut len,
+        )
+    };
+    let s = from_wide(&buf);
+    (hr.is_ok() && !s.trim().is_empty()).then(|| s.trim().to_string())
+}
+
+fn assoc_handlers(ext: &str, filter: ASSOC_FILTER) -> Vec<IAssocHandler> {
+    ensure_com();
+    let Ok(list) = (unsafe { SHAssocEnumHandlers(&HSTRING::from(ext), filter) }) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    // a broken handler registration must not loop forever
+    for _ in 0..256 {
+        let mut one = [None];
+        let mut got = 0u32;
+        if unsafe { list.Next(&mut one, Some(&mut got)) }.is_err() || got == 0 {
+            break;
+        }
+        if let [Some(h)] = one {
+            out.push(h);
+        }
+    }
+    out
+}
+
+static HANDLER_ICONS: OnceLock<Mutex<HashMap<String, Option<Arc<RgbaImage>>>>> = OnceLock::new();
+
+/// About 32 px: a resource icon (`file,index`) or, for Store apps, the
+/// package image an `@{...}` indirect string points at.
+fn handler_icon(h: &IAssocHandler) -> Option<Arc<RgbaImage>> {
+    let mut loc = PWSTR::null();
+    let mut index = 0i32;
+    unsafe { h.GetIconLocation(&mut loc, &mut index) }.ok()?;
+    let loc = unsafe { take_pwstr(loc) };
+    if loc.trim().is_empty() {
+        return None;
+    }
+    let key = format!("{loc},{index}");
+    let cache = HANDLER_ICONS.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok()?.get(&key) {
+        return hit.clone();
+    }
+    let img = load_handler_icon(&loc, index).map(Arc::new);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, img.clone());
+    }
+    img
+}
+
+fn load_handler_icon(loc: &str, index: i32) -> Option<RgbaImage> {
+    if loc.starts_with('@') {
+        let file = indirect_string(loc)?;
+        let img = image::open(&file).ok()?.to_rgba8();
+        if img.width() > 48 || img.height() > 48 {
+            return Some(image::imageops::resize(
+                &img,
+                32,
+                32,
+                image::imageops::FilterType::Triangle,
+            ));
+        }
+        return Some(img);
+    }
+    let file = HSTRING::from(expand_env(loc.trim_matches('"')));
+    let mut large = HICON::default();
+    let hr = unsafe { SHDefExtractIconW(&file, index, 0, Some(&mut large), None, 32) };
+    if hr.is_err() || large.is_invalid() {
+        return None;
+    }
+    let img = unsafe { hicon_to_rgba(large) };
+    let _ = unsafe { DestroyIcon(large) };
+    img
+}
+
+/// "@dll,-123" / "@{package?ms-resource://...}" resolved; plain text as is.
+fn indirect_string(s: &str) -> Option<String> {
+    if !s.starts_with('@') {
+        return Some(s.to_string());
+    }
+    let mut buf = vec![0u16; 4096];
+    unsafe { SHLoadIndirectString(&HSTRING::from(s), &mut buf, None) }.ok()?;
+    let out = from_wide(&buf);
+    (!out.trim().is_empty()).then(|| out.trim().to_string())
+}
+
+pub fn open_with_handlers(path: &Path) -> Vec<crate::Handler> {
+    let Some(ext) = dot_ext(path) else {
+        return Vec::new();
+    };
+    let default = assoc_string(ASSOCSTR_EXECUTABLE, &ext).map(|s| s.to_lowercase());
+    let mut out: Vec<crate::Handler> = Vec::new();
+    for h in assoc_handlers(&ext, ASSOC_FILTER_RECOMMENDED) {
+        let id = unsafe { h.GetName() }
+            .map(|p| unsafe { take_pwstr(p) })
+            .unwrap_or_default();
+        if id.is_empty() || out.iter().any(|o| o.id.eq_ignore_ascii_case(&id)) {
+            continue;
+        }
+        let name = unsafe { h.GetUIName() }
+            .map(|p| unsafe { take_pwstr(p) })
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| {
+                Path::new(&id)
+                    .file_stem()
+                    .map_or_else(|| id.clone(), |s| s.to_string_lossy().into_owned())
+            });
+        let icon = handler_icon(&h);
+        out.push(crate::Handler { id, name, icon });
+    }
+    // the shell usually lists the default first already; make sure
+    if let Some(d) = default
+        && let Some(i) = out.iter().position(|h| h.id.to_lowercase() == d)
+    {
+        let h = out.remove(i);
+        out.insert(0, h);
+    }
+    out
+}
+
+fn data_object(paths: &[PathBuf]) -> io::Result<IDataObject> {
+    let arr = items(paths)?;
+    unsafe { arr.BindToHandler(None, &BHID_DataObject) }.map_err(win_err)
+}
+
+pub fn open_with(path: &Path, handler_id: &str) -> io::Result<()> {
+    let ext = dot_ext(path).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: no file type", path.display()),
+        )
+    })?;
+    let handler = [ASSOC_FILTER_RECOMMENDED, ASSOC_FILTER_NONE]
+        .into_iter()
+        .flat_map(|f| assoc_handlers(&ext, f))
+        .find(|h| {
+            unsafe { h.GetName() }
+                .map(|p| unsafe { take_pwstr(p) })
+                .is_ok_and(|n| n.eq_ignore_ascii_case(handler_id))
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{handler_id}: not a program for {ext}"),
+            )
+        })?;
+    let data = data_object(&[path.to_path_buf()])?;
+    unsafe { handler.Invoke(&data) }
+        .map_err(|e| io::Error::other(format!("{}: {}", path.display(), e.message().trim())))
+}
+
+const CANCELLED: windows::core::HRESULT = ERROR_CANCELLED.to_hresult();
+
+pub fn open_with_dialog(hwnd: isize, path: &Path) -> io::Result<()> {
+    ensure_com();
+    let file = wide(path);
+    let info = OPENASINFO {
+        pcszFile: PCWSTR(file.as_ptr()),
+        pcszClass: PCWSTR::null(),
+        // as Explorer's "选择其他应用": open with the choice, offer "always use this app"
+        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC,
+    };
+    let owner = (hwnd != 0).then_some(HWND(hwnd as *mut _));
+    match unsafe { SHOpenWithDialog(owner, &info) } {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == CANCELLED => {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+        }
+        Err(e) => Err(io::Error::other(format!(
+            "{}: {}",
+            path.display(),
+            e.message().trim()
+        ))),
+    }
+}
+
+pub fn properties(hwnd: isize, paths: &[PathBuf]) -> io::Result<()> {
+    ensure_com();
+    match paths {
+        [] => Err(io::Error::new(io::ErrorKind::InvalidInput, "no items")),
+        [one] => {
+            let owner = (hwnd != 0).then_some(HWND(hwnd as *mut _));
+            let ok =
+                unsafe { SHObjectProperties(owner, SHOP_FILEPATH, &wide(one), PCWSTR::null()) };
+            if ok.as_bool() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "{}: {}",
+                    one.display(),
+                    io::Error::last_os_error()
+                )))
+            }
+        }
+        many => {
+            let data = data_object(many)?;
+            unsafe { SHMultiFileProperties(&data, 0) }.map_err(win_err)
+        }
+    }
+}
+
+// ---------- new items ----------
+
+struct Key(HKEY);
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        let _ = unsafe { RegCloseKey(self.0) };
+    }
+}
+
+fn open_key(sub: &str) -> Option<Key> {
+    let mut k = HKEY::default();
+    let r = unsafe {
+        RegOpenKeyExW(
+            HKEY_CLASSES_ROOT,
+            &HSTRING::from(sub),
+            None,
+            KEY_READ,
+            &mut k,
+        )
+    };
+    (r == ERROR_SUCCESS).then_some(Key(k))
+}
+
+/// A value's type and bytes; `name` None = the key's default value.
+fn reg_value(key: &Key, name: Option<&str>) -> Option<(REG_VALUE_TYPE, Vec<u8>)> {
+    let name = name.map(HSTRING::from);
+    let pname = name.as_ref().map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr()));
+    let flags = RRF_RT_ANY | RRF_NOEXPAND;
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut size = 0u32;
+    let r = unsafe {
+        RegGetValueW(
+            key.0,
+            PCWSTR::null(),
+            pname,
+            flags,
+            Some(&mut ty),
+            None,
+            Some(&mut size),
+        )
+    };
+    if r != ERROR_SUCCESS {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize + 2];
+    let mut size = buf.len() as u32;
+    let r = unsafe {
+        RegGetValueW(
+            key.0,
+            PCWSTR::null(),
+            pname,
+            flags,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr() as _),
+            Some(&mut size),
+        )
+    };
+    if r != ERROR_SUCCESS {
+        return None;
+    }
+    buf.truncate(size as usize);
+    Some((ty, buf))
+}
+
+fn reg_string(key: &Key, name: Option<&str>) -> Option<String> {
+    let (ty, bytes) = reg_value(key, name)?;
+    if ty != REG_SZ && ty != REG_EXPAND_SZ {
+        return None;
+    }
+    let wide: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .collect();
+    Some(from_wide(&wide))
+}
+
+enum Template {
+    Empty,
+    Bytes(Vec<u8>),
+    File(String),
+}
+
+struct ShellNew {
+    template: Template,
+    /// ItemName: the base name for new files ("新建 文本文档"), localized.
+    item_name: Option<String>,
+}
+
+/// `HKCR\.ext\ShellNew` or `HKCR\.ext\<ProgID>\ShellNew`, when it makes a
+/// file from NullFile / Data / FileName (Command, Handler and Directory
+/// entries run code or make folders: left out).
+fn shell_new(ext: &str) -> Option<ShellNew> {
+    let progid = open_key(ext).and_then(|k| reg_string(&k, None));
+    let mut places = vec![format!("{ext}\\ShellNew")];
+    if let Some(p) = progid.filter(|p| !p.is_empty() && !p.contains(['\\', '/'])) {
+        places.push(format!("{ext}\\{p}\\ShellNew"));
+    }
+    for place in places {
+        let Some(k) = open_key(&place) else { continue };
+        if ["Command", "Handler", "Directory"]
+            .iter()
+            .any(|v| reg_value(&k, Some(v)).is_some())
+        {
+            continue;
+        }
+        let template = if reg_value(&k, Some("NullFile")).is_some() {
+            Template::Empty
+        } else if let Some(f) = reg_string(&k, Some("FileName")).filter(|f| !f.trim().is_empty()) {
+            Template::File(f)
+        } else if let Some((ty, bytes)) = reg_value(&k, Some("Data")) {
+            if ty == REG_SZ || ty == REG_EXPAND_SZ {
+                let wide: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes(*c))
+                    .collect();
+                Template::Bytes(from_wide(&wide).into_bytes())
+            } else {
+                Template::Bytes(bytes)
+            }
+        } else {
+            continue;
+        };
+        let item_name = reg_string(&k, Some("ItemName"))
+            .and_then(|s| indirect_string(&expand_env(&s)))
+            .filter(|s| crate::check_name(s).is_ok());
+        return Some(ShellNew {
+            template,
+            item_name,
+        });
+    }
+    None
+}
+
+fn type_name(ext: &str) -> String {
+    assoc_string(ASSOCSTR_FRIENDLYDOCNAME, ext)
+        .unwrap_or_else(|| format!("{} 文件", ext.trim_start_matches('.').to_uppercase()))
+}
+
+fn class_extensions() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = vec![0u16; 512];
+    for i in 0..200_000u32 {
+        let mut len = buf.len() as u32;
+        let r = unsafe {
+            RegEnumKeyExW(
+                HKEY_CLASSES_ROOT,
+                i,
+                Some(PWSTR(buf.as_mut_ptr())),
+                &mut len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if r == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        if r != ERROR_SUCCESS {
+            continue;
+        }
+        let name = String::from_utf16_lossy(buf.get(..len as usize).unwrap_or_default());
+        if name.len() > 1 && name.starts_with('.') {
+            out.push(name.to_lowercase());
+        }
+    }
+    out
+}
+
+static NEW_ITEMS: Mutex<Option<(std::time::Instant, Vec<crate::NewItem>)>> = Mutex::new(None);
+
+pub fn new_items() -> Vec<crate::NewItem> {
+    if let Ok(c) = NEW_ITEMS.lock()
+        && let Some((at, items)) = c.as_ref()
+        && at.elapsed() < std::time::Duration::from_secs(30)
+    {
+        return items.clone();
+    }
+    ensure_com();
+    let mut items: Vec<crate::NewItem> = class_extensions()
+        .into_iter()
+        .filter(|ext| ext != ".lnk" && crate::norm_ext(ext).is_ok() && shell_new(ext).is_some())
+        .map(|ext| crate::NewItem {
+            name: type_name(&ext),
+            icon: file_icon(Path::new(&format!("x{ext}")), false, 32),
+            ext,
+        })
+        .collect();
+    if !items.iter().any(|i| i.ext == ".txt") {
+        items.push(crate::NewItem {
+            name: assoc_string(ASSOCSTR_FRIENDLYDOCNAME, ".txt")
+                .unwrap_or_else(|| "文本文档".into()),
+            icon: file_icon(Path::new("x.txt"), false, 32),
+            ext: ".txt".into(),
+        });
+    }
+    items.sort_by_cached_key(|i| (i.name.to_lowercase(), i.ext.clone()));
+    items.dedup_by(|a, b| a.ext == b.ext);
+    if let Ok(mut c) = NEW_ITEMS.lock() {
+        *c = Some((std::time::Instant::now(), items.clone()));
+    }
+    items
+}
+
+/// FileName templates: absolute, or in the user's / common Templates folder
+/// or %SystemRoot%\ShellNew, as Explorer looks them up.
+fn find_template(name: &str) -> Option<PathBuf> {
+    let name = expand_env(name.trim_matches('"'));
+    let p = PathBuf::from(&name);
+    if p.is_absolute() {
+        return p.is_file().then_some(p);
+    }
+    let windir = std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("ShellNew"));
+    [
+        known_path(&FOLDERID_Templates),
+        known_path(&FOLDERID_CommonTemplates),
+        windir,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|d| d.join(&name))
+    .find(|f| f.is_file())
+}
+
+pub fn create_new(dir: &Path, ext: &str) -> io::Result<PathBuf> {
+    ensure_com();
+    let ext = crate::norm_ext(ext)?;
+    let entry = shell_new(&ext);
+    let base = entry
+        .as_ref()
+        .and_then(|e| e.item_name.clone())
+        .unwrap_or_else(|| crate::new_base_name(&type_name(&ext)));
+    // a missing FileName template gives an empty file, which Office and most programs open as new
+    let contents = match entry.map(|e| e.template) {
+        Some(Template::Bytes(b)) => b,
+        Some(Template::File(f)) => match find_template(&f) {
+            Some(t) => std::fs::read(t)?,
+            None => Vec::new(),
+        },
+        Some(Template::Empty) | None => Vec::new(),
+    };
+    let path = crate::create_numbered(dir, &base, &ext, &contents)?;
+    let w = wide(&path);
+    unsafe { SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, Some(w.as_ptr() as _), None) };
+    Ok(path)
+}
+
+// ---------- terminal ----------
+
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
+/// Windows Terminal's app execution alias (a reparse point: exists() can't see it).
+fn windows_terminal() -> Option<PathBuf> {
+    let alias = std::env::var_os("LOCALAPPDATA")
+        .map(|d| PathBuf::from(d).join(r"Microsoft\WindowsApps\wt.exe"));
+    let on_path = std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("wt.exe"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    alias
+        .into_iter()
+        .chain(on_path)
+        .find(|p| std::fs::symlink_metadata(p).is_ok())
+}
+
+pub fn open_terminal(dir: &Path) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    if !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not a folder", dir.display()),
+        ));
+    }
+    let quiet = |c: &mut Command| {
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    };
+    if let Some(wt) = windows_terminal() {
+        // wt splits its command line at ';'; a trailing '\' would escape the closing quote
+        let mut d = dir.to_string_lossy().replace(';', "\\;");
+        if d.ends_with('\\') && !d.ends_with(":\\") {
+            d.pop();
+        }
+        let mut c = Command::new(wt);
+        c.arg("-d").arg(d).current_dir(dir);
+        quiet(&mut c);
+        if c.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    let system = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let ps = system.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let mut c = Command::new(&ps);
+    c.arg("-NoExit")
+        .current_dir(dir)
+        .creation_flags(CREATE_NEW_CONSOLE);
+    match c.spawn() {
+        Ok(_) => Ok(()),
+        Err(_) => Command::new(system.join(r"System32\cmd.exe"))
+            .arg("/K")
+            .current_dir(dir)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map(|_| ()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1142,7 +1704,9 @@ mod tests {
 
         // a shortcut to nothing opens with an error, not a dialog
         let missing = d.join("missing.lnk");
-        let r = within(60, "open missing.lnk", move || open_with(&missing, false));
+        let r = within(60, "open missing.lnk", move || {
+            open_default(&missing, false)
+        });
         assert!(r.is_err(), "missing target opened: {r:?}");
         eprintln!("missing.lnk: {}", r.unwrap_err());
         let _ = std::fs::remove_dir_all(&d);
@@ -1164,12 +1728,109 @@ mod tests {
         let bare = d.join("无扩展名");
         std::fs::write(&bare, "x").unwrap();
         let r = within(60, "open file without extension", move || {
-            open_with(&bare, false)
+            open_default(&bare, false)
         });
         eprintln!("no extension: {r:?}");
         let _ = std::process::Command::new("taskkill")
             .args(["/IM", "OpenWith.exe", "/F"])
             .output();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn open_with_and_new_menu() {
+        let handlers = within(60, "open_with_handlers", || {
+            open_with_handlers(Path::new(r"C:\x.txt"))
+                .into_iter()
+                .map(|h| (h.id, h.name, h.icon.map(|i| i.dimensions())))
+                .collect::<Vec<_>>()
+        });
+        println!("handlers for .txt: {handlers:?}");
+        assert!(!handlers.is_empty(), "no handlers for .txt");
+        assert!(open_with_handlers(Path::new(r"C:\no_extension")).is_empty());
+        assert!(open_with_handlers(Path::new(r"C:\x.grids-unknown-type")).len() < 100);
+
+        let items = within(60, "new_items", new_items);
+        println!(
+            "new items: {:?}",
+            items
+                .iter()
+                .map(|i| (&i.ext, &i.name, i.icon.is_some()))
+                .collect::<Vec<_>>()
+        );
+        assert!(items.iter().any(|i| i.ext == ".txt"));
+        assert!(
+            items
+                .iter()
+                .all(|i| i.ext.starts_with('.') && !i.name.is_empty())
+        );
+
+        let d = std::env::temp_dir().join(format!("grids_win_new_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let a = create_new(&d, ".txt").unwrap();
+        let b = create_new(&d, ".txt").unwrap();
+        println!("created {a:?} then {b:?}");
+        assert!(
+            b.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(" (2).txt")
+        );
+        for i in &items {
+            if i.ext != ".txt" {
+                let p = create_new(&d, &i.ext);
+                println!("new {}: {p:?}", i.ext);
+                assert!(p.is_ok_and(|p| p.is_file()));
+            }
+        }
+
+        // open with an explicit handler (Notepad on the runner), then close it
+        if let Some((id, _, _)) = handlers
+            .iter()
+            .find(|h| h.0.to_lowercase().contains("notepad"))
+        {
+            let (a, id) = (a.clone(), id.clone());
+            let r = within(60, "open_with notepad", move || open_with(&a, &id));
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = std::process::Command::new("taskkill")
+                .args(["/IM", "notepad.exe", "/F"])
+                .output();
+            assert!(r.is_ok(), "{r:?}");
+        }
+        assert_eq!(
+            open_with(&a, r"C:\no\such.exe").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn zip_opens_in_windows() {
+        let d = std::env::temp_dir().join(format!("grids_win_zip_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("资料 夹").join("内层")).unwrap();
+        std::fs::write(d.join("资料 夹").join("内层").join("说明.txt"), "你好").unwrap();
+        std::fs::write(d.join("报告 1.txt"), "x".repeat(10_000)).unwrap();
+        let zip = d.join("归档.zip");
+        crate::compress_zip(&[d.join("资料 夹"), d.join("报告 1.txt")], &zip).unwrap();
+        let out = d.join("out");
+        let st = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Expand-Archive -LiteralPath $env:GRIDS_ZIP -DestinationPath $env:GRIDS_OUT",
+            ])
+            .env("GRIDS_ZIP", &zip)
+            .env("GRIDS_OUT", &out)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert_eq!(
+            std::fs::read_to_string(out.join("资料 夹").join("内层").join("说明.txt")).unwrap(),
+            "你好"
+        );
+        assert_eq!(std::fs::read(out.join("报告 1.txt")).unwrap().len(), 10_000);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

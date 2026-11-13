@@ -53,7 +53,7 @@ jobs:
       # shell tests drive the real Windows Shell; a dialog waiting for a click must not eat the job
       - name: Test
         timeout-minutes: 15
-        run: cargo test --release --locked --workspace
+        run: cargo test --release --locked --workspace -- --show-output
 
       - name: Clippy (Windows platform layer)
         run: cargo clippy --release --locked -p grids_shell --all-targets
@@ -63,6 +63,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/grids.exe dist/grids.exe
+          # symbols for crash backtraces (release has debug = "line-tables-only")
+          if (Test-Path target/release/grids.pdb) { Copy-Item target/release/grids.pdb dist/grids.pdb }
           Copy-Item LICENSE dist/
           if (Test-Path THIRD_PARTY.md) { Copy-Item THIRD_PARTY.md dist/ }
           (Get-FileHash dist/grids.exe -Algorithm SHA256).Hash | Out-File dist/grids.exe.sha256 -Encoding ascii

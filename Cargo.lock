@@ -2385,6 +2385,8 @@ dependencies = [
 name = "grids_shell"
 version = "0.8.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "image",
  "raw-window-handle",
  "windows 0.61.3",
