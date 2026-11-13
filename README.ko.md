@@ -53,7 +53,7 @@ Windows용 빠르고 가벼운 다중 패널 파일 관리자입니다. 한 창�
 
 코드 서명이 없는 exe라 처음 실행할 때 Windows SmartScreen 경고가 뜰 수 있습니다. **추가 정보 → 실행**을 누르세요.
 
-**요구 사항**: Windows 10(1903 이상) 또는 Windows 11, x64.
+**요구 사항**: Windows 10(1903 이상) 또는 Windows 11, x64. 따로 설치할 것은 없습니다. C 런타임이 `grids.exe`에 포함되어 있어 Visual C++ 재배포 패키지가 필요 없고, 그 밖에 불러오는 DLL은 모두 Windows에 들어 있습니다(GPUI가 쓰는 Windows 내장 ICU `icuuc.dll` 포함, 그래서 최소 1903).
 
 ## 단축키
 

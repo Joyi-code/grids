@@ -1,0 +1,47 @@
+# Platform layer: Windows Shell APIs on Windows, std fallbacks elsewhere.
+[package]
+name = "grids_shell"
+version = "0.8.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+# for compress_zip; both already in the tree through image/png
+flate2 = "1.1"
+crc32fast = "1.5"
+
+# thumbnails off Windows decode these here; on Windows the shell does it,
+# so grids.exe does not carry the extra decoders
+[target.'cfg(not(windows))'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+# 0.61: the same windows crate GPUI 0.2.2 uses, so it is built only once.
+[target.'cfg(windows)'.dependencies]
+# already in the tree through `windows`; #[implement] (COM callbacks) names it directly
+windows-core = "0.61"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Environment",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_RestartManager",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

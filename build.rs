@@ -1,49 +1,44 @@
-// Embeds app.manifest (common controls v6 + per-monitor DPI) and app.ico (made by icon.py).
-// Writes a binary .res by hand and lets windres only convert it to COFF, so no C preprocessor is needed.
+//! Embeds the app icon in grids.exe (Windows targets only) and records the
+//! build for the version popover: GRIDS_GIT_HASH (short commit, "unknown"
+//! outside a checkout) and GRIDS_BUILD_DATE (UTC, YYYY-MM-DD; honours
+//! SOURCE_DATE_EPOCH for reproducible builds).
 fn main() {
-    println!("cargo:rerun-if-changed=app.manifest");
-    println!("cargo:rerun-if-changed=app.ico");
-    let out = std::env::var("OUT_DIR").unwrap();
-    let entry = |size: usize, typ: u16, id: u16, lang: u16| {
-        let mut h = Vec::new();
-        h.extend((size as u32).to_le_bytes());
-        h.extend(32u32.to_le_bytes()); // header size
-        h.extend([0xFFFF, typ, 0xFFFF, id].iter().flat_map(|w: &u16| w.to_le_bytes()));
-        h.extend(0u32.to_le_bytes()); // data version
-        h.extend([0u16, lang].iter().flat_map(|w| w.to_le_bytes())); // memory flags, language
-        h.extend([0u32; 2].iter().flat_map(|d| d.to_le_bytes())); // version, characteristics
-        h
-    };
-    let mut res = entry(0, 0, 0, 0); // mandatory empty first entry
-    let mut add = |typ: u16, id: u16, data: &[u8]| {
-        res.extend(entry(data.len(), typ, id, 0x0409));
-        res.extend(data);
-        res.resize(res.len().next_multiple_of(4), 0);
-    };
-    add(24, 1, &std::fs::read("app.manifest").unwrap()); // RT_MANIFEST
-
-    // app.ico -> one RT_ICON per image + an RT_GROUP_ICON (id 1) that lists them
-    let ico = std::fs::read("app.ico").unwrap();
-    let count = u16::from_le_bytes([ico[4], ico[5]]);
-    let mut group = vec![0, 0, 1, 0];
-    group.extend(count.to_le_bytes());
-    for k in 0..count as usize {
-        let e = &ico[6 + 16 * k..22 + 16 * k];
-        let size = u32::from_le_bytes(e[8..12].try_into().unwrap()) as usize;
-        let offset = u32::from_le_bytes(e[12..16].try_into().unwrap()) as usize;
-        add(3, k as u16 + 1, &ico[offset..offset + size]); // RT_ICON
-        group.extend(&e[..12]); // width, height, colours, reserved, planes, bit count, bytes
-        group.extend((k as u16 + 1).to_le_bytes());
+    println!("cargo:rerun-if-changed=assets/icon/grids.rc");
+    println!("cargo:rerun-if-changed=assets/icon/grids.ico");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // A new commit moves HEAD (or the branch it points at).
+    for f in [".git/HEAD", ".git/refs/heads", ".git/packed-refs"] {
+        if std::path::Path::new(f).exists() { println!("cargo:rerun-if-changed={f}") }
     }
-    add(14, 1, &group); // RT_GROUP_ICON
-    std::fs::write(format!("{out}/app.res"), res).unwrap();
+    let hash = std::process::Command::new("git").args(["rev-parse", "--short=7", "HEAD"]).output().ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=GRIDS_GIT_HASH={hash}");
+    let secs = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    println!("cargo:rustc-env=GRIDS_BUILD_DATE={y:04}-{m:02}-{d:02}");
 
-    let obj = format!("{out}/app.res.o");
-    let windres = std::env::var("WINDRES").unwrap_or("windres".into());
-    let ok = std::process::Command::new(windres)
-        .args(["-J", "res", "-i", &format!("{out}/app.res"), "-O", "coff", "-o", &obj])
-        .status()
-        .is_ok_and(|s| s.success());
-    assert!(ok, "windres failed: set WINDRES to msys2's windres.exe");
-    println!("cargo:rustc-link-arg-bins={obj}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_resource::compile("assets/icon/grids.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("grids.rc: resource compile failed");
+    }
+}
+
+/// Days since 1970-01-01 to (year, month, day), proleptic Gregorian
+/// (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }

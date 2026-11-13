@@ -1,0 +1,323 @@
+name: CI
+
+on:
+  push:
+    branches: [main, gpui-rewrite]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    name: Windows x64 release build + tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the compiler (and clippy); rustup installs it here.
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # GPUI's build script compiles its HLSL shaders with fxc.exe from the Windows SDK;
+      # point it at the newest SDK on the runner instead of its one hard-coded version.
+      - name: Locate fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object { [version]($_.Directory.Parent.Name) } -Descending | Select-Object -First 1
+          if (!$fxc) { throw 'fxc.exe not found in the Windows SDK' }
+          Write-Host "fxc: $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      # Grids is fully offline: grids.exe must not import any networking DLL
+      - name: Offline check (grids.exe imports)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (!$dumpbin) { throw 'dumpbin.exe not found' }
+          $out = & $dumpbin /nologo /imports target/release/grids.exe
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed ($LASTEXITCODE)" }
+          $dlls = $out | Where-Object { $_ -match '^\s{4}(\S+\.dll)\s*$' } | ForEach-Object { $Matches[1].ToLowerInvariant() } | Sort-Object -Unique
+          "imported DLLs:"; $dlls
+          "## grids.exe imports" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "``$($dlls -join ', ')``" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          # Grids needs no install: the C runtime is linked statically (.cargo/config.toml)
+          $crt = $dlls | Where-Object { $_ -like 'vcruntime*.dll' -or $_ -like 'msvcp*.dll' -or $_ -like 'api-ms-win-crt-*' -or $_ -like 'ucrtbase*.dll' -or $_ -like 'msvcr*.dll' }
+          if ($crt) {
+            # name the functions, to trace the crate or object that still wants the DLL CRT
+            $cur = $null
+            foreach ($line in $out) {
+              if ($line -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1].ToLowerInvariant() }
+              elseif ($cur -in $crt -and $line -match '^\s+[0-9A-F]+\s+(\S+)\s*$') { "  $cur!$($Matches[1])" }
+            }
+            throw "grids.exe imports the C runtime DLLs (a clean Windows may lack them): $($crt -join ', ')"
+          }
+          $bad = $dlls | Where-Object { $_ -in 'winhttp.dll', 'wininet.dll', 'ws2_32.dll', 'mswsock.dll', 'iphlpapi.dll', 'dnsapi.dll', 'urlmon.dll', 'websocket.dll' }
+          if ($bad) {
+            # show which functions are pulled in, to trace the crate responsible
+            $cur = $null
+            foreach ($line in $out) {
+              if ($line -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1].ToLowerInvariant() }
+              elseif ($cur -in $bad -and $line -match '^\s+[0-9A-F]+\s+(\S+)\s*$') { "  $cur!$($Matches[1])" }
+            }
+            throw "grids.exe imports networking DLLs: $($bad -join ', ')"
+          }
+
+      # shell tests drive the real Windows Shell; a dialog waiting for a click must not eat the job
+      - name: Test
+        timeout-minutes: 15
+        run: cargo test --release --locked --workspace -- --show-output
+
+      - name: Clippy (Windows platform layer)
+        run: cargo clippy --release --locked -p grids_shell --all-targets
+
+      # the previous build's size on this branch (falls back to main's), for the delta
+      - name: Restore previous size
+        uses: actions/cache/restore@v4
+        with:
+          path: .size
+          key: exe-size-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            exe-size-${{ github.ref_name }}-
+            exe-size-main-
+
+      # users get grids.exe alone; its hash goes to the log and the run summary.
+      # Size gate: grids.exe over 8,000,000 bytes fails the job (catches runaway growth only).
+      - name: Collect grids.exe
+        shell: pwsh
+        env:
+          SIZE_LIMIT: 8000000
+          # v0.9 feature budget (400 KB) counts from the last measured pre-v0.9 build
+          BASELINE_COMMIT: 7d7948c
+          BASELINE_BYTES: 4863488
+        run: |
+          New-Item -ItemType Directory -Force dist, symbols | Out-Null
+          Copy-Item target/release/grids.exe dist/grids.exe
+          if (Test-Path target/release/grids.pdb) { Copy-Item target/release/grids.pdb symbols/grids.pdb }
+          $exe = Get-Item dist/grids.exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "grids.exe  $($exe.Length) bytes  SHA256 $hash"
+          "## grids.exe" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| | |" >> $env:GITHUB_STEP_SUMMARY
+          "|---|---|" >> $env:GITHUB_STEP_SUMMARY
+          "| Size | $($exe.Length) bytes ($([math]::Round($exe.Length / 1MB, 2)) MiB) |" >> $env:GITHUB_STEP_SUMMARY
+          "| SHA256 | ``$hash`` |" >> $env:GITHUB_STEP_SUMMARY
+          function Delta([long]$d) { if ($d -ge 0) { "+$d bytes (+$([math]::Round($d / 1KB, 1)) KiB)" } else { "$d bytes ($([math]::Round($d / 1KB, 1)) KiB)" } }
+          $prev = if (Test-Path .size/grids.exe.txt) { (Get-Content .size/grids.exe.txt -Raw).Trim() -split '\s+' } else { @() }
+          if ($prev.Count -ge 2) {
+            "| vs previous build ($($prev[1].Substring(0, 7))) | $(Delta ($exe.Length - [long]$prev[0])) |" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "| vs previous build | (no earlier size cached) |" >> $env:GITHUB_STEP_SUMMARY
+          }
+          "| vs $env:BASELINE_COMMIT ($env:BASELINE_BYTES bytes) | $(Delta ($exe.Length - [long]$env:BASELINE_BYTES)) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Limit | $env:SIZE_LIMIT bytes |" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          if ($exe.Length -gt [long]$env:SIZE_LIMIT) {
+            "::error::grids.exe is $($exe.Length) bytes, over the $env:SIZE_LIMIT-byte limit"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force .size | Out-Null
+          "$($exe.Length) $env:GITHUB_SHA" | Set-Content .size/grids.exe.txt
+
+      - name: Save size
+        uses: actions/cache/save@v4
+        with:
+          path: .size
+          key: exe-size-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload grids.exe
+        uses: actions/upload-artifact@v5
+        with:
+          name: grids-windows-x64
+          path: dist/grids.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      # crash-log backtraces resolve lines against this (release keeps line tables)
+      - name: Upload symbols
+        uses: actions/upload-artifact@v5
+        with:
+          name: grids-windows-x64-symbols
+          path: symbols/grids.pdb
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # cargo bloat rebuilds with full debug info on MSVC (it sets CARGO_PROFILE_RELEASE_DEBUG=true),
+  # so it gets its own job beside the release build instead of doubling that job's time
+  size:
+    name: Windows size report (cargo bloat)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bloat
+
+      - name: Locate fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($fxc) { "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV }
+
+      - name: Install cargo-bloat
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo-bloat -ErrorAction SilentlyContinue)) {
+            cargo install cargo-bloat --locked
+          }
+
+      - name: Restore previous bloat
+        uses: actions/cache/restore@v4
+        with:
+          path: .bloat
+          key: bloat-crates-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bloat-crates-${{ github.ref_name }}-
+            bloat-crates-main-
+
+      - name: cargo bloat
+        shell: pwsh
+        run: |
+          $fns = cargo bloat --release --locked --bin grids -n 30 2>&1 | Out-String
+          # the next runs reuse the first build
+          $crates = cargo bloat --release --locked --bin grids --crates -n 30 2>&1 | Out-String
+          $json = cargo bloat --release --locked --bin grids --crates -n 0 --message-format json 2>$null | Select-Object -Last 1
+          $fns
+          $crates
+          $exe = Get-Item target/release/grids.exe
+          "## Size report (cargo bloat)" >> $env:GITHUB_STEP_SUMMARY
+          "This build keeps full debug info for the analysis; the shipped grids.exe size is in the Windows build job's summary (this one: $($exe.Length) bytes)." >> $env:GITHUB_STEP_SUMMARY
+          # .text per crate against the previous run on this branch
+          try {
+            $now = $json | ConvertFrom-Json
+            $prevFile = '.bloat/crates.json'
+            if (Test-Path $prevFile) {
+              $prev = Get-Content $prevFile -Raw | ConvertFrom-Json
+              $old = @{}; foreach ($c in $prev.crates) { $old[$c.name] = [long]$c.size }
+              $new = @{}; foreach ($c in $now.crates) { $new[$c.name] = [long]$c.size }
+              $rows = foreach ($n in (@($old.Keys) + @($new.Keys) | Sort-Object -Unique)) {
+                $d = [long]$new[$n] - [long]$old[$n]
+                if ($d -ne 0) { [pscustomobject]@{ Crate = $n; Delta = $d; Now = [long]$new[$n] } }
+              }
+              $textDelta = [long]$now.'text-section-size' - [long]$prev.'text-section-size'
+              "### Change since previous build ($((Get-Content .bloat/sha.txt -ErrorAction SilentlyContinue) -replace '^(.{7}).*','$1'))" >> $env:GITHUB_STEP_SUMMARY
+              ".text: $([long]$prev.'text-section-size') -> $([long]$now.'text-section-size') bytes ($('{0:+#;-#;0}' -f $textDelta))" >> $env:GITHUB_STEP_SUMMARY
+              "" >> $env:GITHUB_STEP_SUMMARY
+              "| Crate | Delta bytes | Now |" >> $env:GITHUB_STEP_SUMMARY
+              "|---|---:|---:|" >> $env:GITHUB_STEP_SUMMARY
+              foreach ($r in ($rows | Sort-Object { [math]::Abs($_.Delta) } -Descending | Select-Object -First 20)) {
+                "| $($r.Crate) | $('{0:+#;-#;0}' -f $r.Delta) | $($r.Now) |" >> $env:GITHUB_STEP_SUMMARY
+              }
+              if (-not $rows) { "| (no change) | 0 | |" >> $env:GITHUB_STEP_SUMMARY }
+              "" >> $env:GITHUB_STEP_SUMMARY
+            } else {
+              "(no earlier bloat report cached, delta starts with the next build)" >> $env:GITHUB_STEP_SUMMARY
+            }
+            New-Item -ItemType Directory -Force .bloat | Out-Null
+            $json | Set-Content .bloat/crates.json
+            $env:GITHUB_SHA | Set-Content .bloat/sha.txt
+          } catch {
+            "(bloat delta unavailable: $_)" >> $env:GITHUB_STEP_SUMMARY
+          }
+          "### Largest functions" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          ($fns -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          "### By crate" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          ($crates -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Save bloat
+        if: hashFiles('.bloat/crates.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .bloat
+          key: bloat-crates-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  offline:
+    name: Offline check (no networking crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      # Grids never touches the network. smol (GPUI's executor) always re-exports
+      # async-net, a thin std::net wrapper with no HTTP/TLS, so it is tolerated here;
+      # the Windows job's import check proves nothing of it reaches grids.exe.
+      - name: cargo tree deny-list
+        run: |
+          deny='^(reqwest|zed-reqwest|hyper|hyper-util|hyper-rustls|hyper-tls|h2|h3|quinn|ureq|curl|curl-sys|isahc|attohttpc|surf|http-client|gpui_http_client|winhttp|wininet|native-tls|openssl|openssl-sys|rustls|tokio-rustls|rustls-native-certs|webpki-roots|socket2|tokio|tungstenite|async-tungstenite|tokio-tungstenite|trust-dns-resolver|hickory-resolver)$'
+          fail=0
+          for t in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu; do
+            found=$(cargo tree --locked -e normal,build --target "$t" --prefix none -f '{p}' | awk '{print $1}' | sort -u | grep -E "$deny" || true)
+            if [ -n "$found" ]; then
+              fail=1
+              echo "::error::networking crates for $t: $(echo $found)"
+              for c in $found; do cargo tree --locked -e normal,build --target "$t" -i "$c" | head -8; done
+            else
+              echo "$t: no networking crates"
+            fi
+          done
+          exit $fail
+
+  linux:
+    name: Linux clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
+
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets
+
+      - name: Test
+        run: cargo test --locked --workspace

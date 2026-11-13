@@ -1,0 +1,890 @@
+//! Fallbacks for non-Windows platforms: std file operations, the freedesktop
+//! trash, `xdg-open` / `open`, an in-process file clipboard. No icons and no
+//! native context menu.
+
+use crate::{
+    Drive, Handler, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, NewItem, OpItem,
+    RgbaImage, classify_target, copy_tree, create_numbered, free_copy_name, is_within,
+    new_base_name,
+};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+fn spawn(cmd: &str, args: &[&std::ffi::OsStr]) -> io::Result<()> {
+    Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+pub fn open_with_system(path: &Path) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        spawn("open", &[path.as_os_str()])
+    } else {
+        spawn("xdg-open", &[path.as_os_str()])
+    }
+}
+
+pub fn reveal_in_explorer(path: &Path) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        return spawn("open", &["-R".as_ref(), path.as_os_str()]);
+    }
+    // FileManager1 selects the item (Nautilus, Dolphin, Nemo ...); else open the parent folder.
+    let uri = format!("array:string:file://{}", path.display());
+    let selected = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+            &uri,
+            "string:",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if selected {
+        return Ok(());
+    }
+    open_with_system(path.parent().unwrap_or(path))
+}
+
+pub fn file_icon(_path: &Path, _is_dir: bool, _size: u32) -> Option<Arc<RgbaImage>> {
+    None
+}
+
+pub fn context_menu(_hwnd: isize, _paths: &[PathBuf], _pos: (i32, i32)) -> MenuAction {
+    MenuAction::Dismissed
+}
+
+pub fn background_menu(_hwnd: isize, _folder: &Path, _pos: (i32, i32)) -> MenuAction {
+    MenuAction::Dismissed
+}
+
+// ---------- links ----------
+
+pub fn resolve_link(lnk: &Path) -> io::Result<LinkTarget> {
+    let meta = std::fs::symlink_metadata(lnk)?;
+    if !meta.file_type().is_symlink() {
+        return Ok(LinkTarget::Other);
+    }
+    let raw = std::fs::read_link(lnk)?;
+    let target = match lnk.parent() {
+        Some(dir) if raw.is_relative() => dir.join(&raw),
+        _ => raw,
+    };
+    Ok(classify_target(&target.to_string_lossy()))
+}
+
+pub fn create_link(lnk: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, lnk)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (lnk, target);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "links are not supported here",
+        ))
+    }
+}
+
+// ---------- trash ----------
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+fn trash_dir() -> io::Result<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return home()
+            .map(|h| h.join(".Trash"))
+            .ok_or_else(|| io::Error::other("no HOME"));
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home().map(|h| h.join(".local/share")));
+    data.map(|d| d.join("Trash"))
+        .ok_or_else(|| io::Error::other("no HOME"))
+}
+
+/// Percent-encodes a path for a .trashinfo `Path=` line.
+fn trash_encode(p: &Path) -> String {
+    let mut out = String::new();
+    for b in p.to_string_lossy().as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn now_iso() -> String {
+    // UTC is fine for DeletionDate; avoids a time crate.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // civil from days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60
+    )
+}
+
+fn move_across(src: &Path, to: &Path) -> io::Result<()> {
+    match std::fs::rename(src, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices || e.raw_os_error() == Some(18) => {
+            copy_tree(src, to)?;
+            remove(src)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn remove(p: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(p)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        std::fs::remove_file(p)
+    }
+}
+
+/// The trash never falls back to deleting: without one, recycling fails.
+pub fn recycle_would_nuke(_paths: &[PathBuf]) -> bool {
+    false
+}
+
+pub fn recycle(paths: &[PathBuf], _confirmed: bool) -> io::Result<Vec<OpItem>> {
+    let trash = trash_dir()?;
+    let files = if cfg!(target_os = "macos") {
+        trash.clone()
+    } else {
+        trash.join("files")
+    };
+    let info = trash.join("info");
+    std::fs::create_dir_all(&files)?;
+    if !cfg!(target_os = "macos") {
+        std::fs::create_dir_all(&info)?;
+    }
+    let mut done = Vec::new();
+    for p in paths {
+        let abs = std::path::absolute(p)?;
+        let name = abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| io::Error::other("cannot trash a root"))?;
+        let free = free_copy_name(&name, true, |n| {
+            files.join(n).exists() || info.join(format!("{n}.trashinfo")).exists()
+        });
+        if !cfg!(target_os = "macos") {
+            let body = format!(
+                "[Trash Info]\nPath={}\nDeletionDate={}\n",
+                trash_encode(&abs),
+                now_iso()
+            );
+            std::fs::write(info.join(format!("{free}.trashinfo")), body)?;
+        }
+        let is_dir = abs.is_dir();
+        if let Err(e) = move_across(&abs, &files.join(&free)) {
+            let _ = std::fs::remove_file(info.join(format!("{free}.trashinfo")));
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: Some(files.join(&free)),
+            is_dir,
+        });
+    }
+    Ok(done)
+}
+
+/// Items done before an error count as the result; the error only when none.
+fn partial(done: Vec<OpItem>, e: io::Error) -> io::Result<Vec<OpItem>> {
+    if done.is_empty() { Err(e) } else { Ok(done) }
+}
+
+pub fn delete(paths: &[PathBuf], _confirmed: bool) -> io::Result<Vec<OpItem>> {
+    let mut done = Vec::new();
+    for p in paths {
+        let is_dir = p.is_dir();
+        if let Err(e) = remove(p) {
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: None,
+            is_dir,
+        });
+    }
+    Ok(done)
+}
+
+/// Parses a .trashinfo body: (decoded Path=, DeletionDate as UTC).
+fn parse_trashinfo(body: &str) -> Option<(PathBuf, std::time::SystemTime)> {
+    let mut path = None;
+    let mut date = None;
+    for line in body.lines() {
+        if let Some(v) = line.strip_prefix("Path=") {
+            path = Some(trash_decode(v)?);
+        } else if let Some(v) = line.strip_prefix("DeletionDate=") {
+            date = parse_iso(v);
+        }
+    }
+    Some((path?, date?))
+}
+
+fn trash_decode(s: &str) -> Option<PathBuf> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        if c == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(out).ok().map(PathBuf::from)
+    }
+}
+
+/// "YYYY-MM-DDTHH:MM:SS" (as written by now_iso) to a SystemTime.
+fn parse_iso(s: &str) -> Option<std::time::SystemTime> {
+    let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    // days from civil (Howard Hinnant)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+pub fn restore_from_recycle_bin(
+    original: &Path,
+    near: std::time::SystemTime,
+) -> io::Result<PathBuf> {
+    let trash = trash_dir()?;
+    let not_found = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not in the trash", original.display()),
+        )
+    };
+    let info = trash.join("info");
+    let entries = std::fs::read_dir(&info).map_err(|_| not_found())?;
+    let candidates = entries.flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let stem = name.strip_suffix(".trashinfo")?.to_owned();
+        let (orig, when) = parse_trashinfo(&std::fs::read_to_string(e.path()).ok()?)?;
+        Some((stem, orig, when))
+    });
+    let abs = std::path::absolute(original)?;
+    let stem = crate::nearest_deleted(candidates, &abs, near).ok_or_else(not_found)?;
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    move_across(&trash.join("files").join(&stem), &abs)?;
+    let _ = std::fs::remove_file(info.join(format!("{stem}.trashinfo")));
+    Ok(abs)
+}
+
+fn name_of(p: &Path) -> io::Result<String> {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("no file name: {}", p.display()),
+            )
+        })
+}
+
+pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
+    let mut done = Vec::new();
+    for p in paths {
+        let is_dir = p.is_dir();
+        if is_dir && is_within(dest, p) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot copy {} into itself", p.display()),
+            ));
+        }
+        let name = free_copy_name(&name_of(p)?, is_dir, |n| {
+            dest.join(n).symlink_metadata().is_ok()
+        });
+        let to = dest.join(name);
+        if let Err(e) = copy_tree(p, &to) {
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: Some(to),
+            is_dir,
+        });
+    }
+    Ok(done)
+}
+
+pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
+    let mut done = Vec::new();
+    for p in paths {
+        let is_dir = p.is_dir();
+        if is_dir && is_within(dest, p) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot move {} into itself", p.display()),
+            ));
+        }
+        // never overwrite: a clash gets a free name, as a copy would
+        let name = free_copy_name(&name_of(p)?, is_dir, |n| {
+            dest.join(n).symlink_metadata().is_ok()
+        });
+        let to = dest.join(name);
+        if let Err(e) = move_across(p, &to) {
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: Some(to),
+            is_dir,
+        });
+    }
+    Ok(done)
+}
+
+pub fn clipboard_image() -> Option<RgbaImage> {
+    None
+}
+
+pub fn clipboard_text() -> Option<String> {
+    None
+}
+
+// ---------- who holds a file ----------
+
+/// Linux: processes with one of `files` among their open fds (`/proc/*/fd`);
+/// only the user's own processes are readable. Elsewhere nothing.
+pub fn lockers(files: &[PathBuf]) -> io::Result<Vec<crate::Locker>> {
+    let mut out = Vec::new();
+    if !cfg!(target_os = "linux") {
+        return Ok(out);
+    }
+    let wanted: std::collections::HashSet<PathBuf> = files
+        .iter()
+        .filter_map(|f| std::fs::canonicalize(f).ok())
+        .collect();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Ok(out);
+    };
+    for p in procs.flatten() {
+        let Some(pid) = p.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+            continue;
+        };
+        let holds = fds
+            .flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .any(|t| wanted.contains(&t));
+        if holds {
+            let exe = std::fs::read_link(p.path().join("exe")).ok();
+            let name = std::fs::read_to_string(p.path().join("comm"))
+                .map(|c| c.trim().to_owned())
+                .unwrap_or_else(|_| format!("PID {pid}"));
+            out.push(crate::Locker {
+                pid,
+                name,
+                kind: crate::AppKind::Unknown,
+                hwnd: None,
+                exe,
+                service: None,
+                can_terminate: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
+pub fn activate_process_window(_pid: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "switching to another program's window is Windows-only",
+    ))
+}
+
+fn kill(pid: u32, signal: &str) -> io::Result<()> {
+    let st = std::process::Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("could not signal process {pid}"),
+        ))
+    }
+}
+
+/// SIGTERM: the polite close.
+pub fn close_process(pid: u32) -> io::Result<()> {
+    kill(pid, "-TERM")
+}
+
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    kill(pid, "-KILL")
+}
+
+pub fn drives() -> Vec<Drive> {
+    let mut out = vec![Drive {
+        path: PathBuf::from("/"),
+        label: String::new(),
+    }];
+    if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+        for line in mounts.lines() {
+            let Some(mnt) = line.split_whitespace().nth(1) else {
+                continue;
+            };
+            let mnt = mnt.replace("\\040", " ");
+            if ["/media/", "/run/media/", "/mnt/"]
+                .iter()
+                .any(|p| mnt.starts_with(p))
+            {
+                let label = Path::new(&mnt)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push(Drive {
+                    path: PathBuf::from(mnt),
+                    label,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// `XDG_DESKTOP_DIR="$HOME/Desktop"` lines from ~/.config/user-dirs.dirs.
+fn xdg_user_dir(key: &str, home: &Path) -> Option<PathBuf> {
+    let cfg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let text = std::fs::read_to_string(cfg.join("user-dirs.dirs")).ok()?;
+    parse_user_dir(&text, key, home)
+}
+
+fn parse_user_dir(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.strip_prefix(key).is_some_and(|r| r.starts_with('=')))?;
+    let value = line.split_once('=')?.1.trim().trim_matches('"');
+    let path = match value.strip_prefix("$HOME") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(value),
+    };
+    (path != home).then_some(path)
+}
+
+pub fn known_folders() -> Vec<KnownFolder> {
+    let Some(home) = home() else {
+        return Vec::new();
+    };
+    let mut out = vec![KnownFolder {
+        kind: KnownFolderKind::Home,
+        path: home.clone(),
+    }];
+    let wanted = [
+        (KnownFolderKind::Desktop, "XDG_DESKTOP_DIR", "Desktop"),
+        (KnownFolderKind::Downloads, "XDG_DOWNLOAD_DIR", "Downloads"),
+        (KnownFolderKind::Documents, "XDG_DOCUMENTS_DIR", "Documents"),
+        (KnownFolderKind::Pictures, "XDG_PICTURES_DIR", "Pictures"),
+    ];
+    for (kind, key, plain) in wanted {
+        let path = xdg_user_dir(key, &home).unwrap_or_else(|| home.join(plain));
+        if path.is_dir() {
+            out.push(KnownFolder { kind, path });
+        }
+    }
+    out
+}
+
+static CLIP: Mutex<Option<(Vec<PathBuf>, bool)>> = Mutex::new(None);
+
+pub fn clipboard_set_files(paths: &[PathBuf], cut: bool) -> io::Result<()> {
+    *CLIP.lock().unwrap_or_else(|e| e.into_inner()) =
+        (!paths.is_empty()).then(|| (paths.to_vec(), cut));
+    Ok(())
+}
+
+pub fn clipboard_get_files() -> Option<(Vec<PathBuf>, bool)> {
+    CLIP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn same_volume(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // the nearest existing ancestor: the target may not exist yet
+        let dev = |p: &Path| {
+            p.ancestors()
+                .find_map(|q| std::fs::metadata(q).ok())
+                .map(|m| m.dev())
+        };
+        match (dev(a), dev(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        a.components().next() == b.components().next()
+    }
+}
+
+// ---------- open with / new / terminal / zip ----------
+
+fn unsupported(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, format!("{what}: Windows only"))
+}
+
+pub fn open_with_handlers(_path: &Path) -> Vec<Handler> {
+    Vec::new()
+}
+
+pub fn open_with(_path: &Path, _handler_id: &str) -> io::Result<()> {
+    Err(unsupported("open with"))
+}
+
+pub fn open_with_dialog(_hwnd: isize, _path: &Path) -> io::Result<()> {
+    Err(unsupported("choose another app"))
+}
+
+pub fn properties(_hwnd: isize, _paths: &[PathBuf]) -> io::Result<()> {
+    Err(unsupported("properties"))
+}
+
+const TXT_NAME: &str = "文本文档";
+
+pub fn new_items() -> Vec<NewItem> {
+    vec![NewItem {
+        ext: ".txt".into(),
+        name: TXT_NAME.into(),
+        icon: None,
+    }]
+}
+
+/// Any extension gives an empty file; `.txt` is named "新建 文本文档.txt".
+pub fn create_new(dir: &Path, ext: &str) -> io::Result<PathBuf> {
+    let ext = crate::norm_ext(ext)?;
+    let type_name = if ext == ".txt" {
+        TXT_NAME.to_string()
+    } else {
+        format!("{} 文件", ext.trim_start_matches('.').to_uppercase())
+    };
+    create_numbered(dir, &new_base_name(&type_name), &ext, &[])
+}
+
+fn on_path(cmd: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
+}
+
+pub fn open_terminal(dir: &Path) -> io::Result<()> {
+    let start = |cmd: &str| {
+        Command::new(cmd)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+    };
+    if cfg!(target_os = "macos") {
+        return spawn(
+            "open",
+            &["-a".as_ref(), "Terminal".as_ref(), dir.as_os_str()],
+        );
+    }
+    let from_env = std::env::var("TERMINAL")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no terminal emulator found");
+    for cmd in from_env.iter().map(String::as_str).chain([
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "kitty",
+        "alacritty",
+        "xterm",
+    ]) {
+        if !cmd.contains('/') && !on_path(cmd) {
+            continue;
+        }
+        match start(cmd) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+// ---------- thumbnails ----------
+
+/// Files larger than this are not decoded for a thumbnail.
+const THUMB_MAX_FILE: u64 = 64 * 1024 * 1024;
+
+pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
+    let size = size.clamp(16, 1024);
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "jpe" | "gif" | "webp" | "bmp"
+    ) {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > THUMB_MAX_FILE {
+        return None;
+    }
+    let mut reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    limits.max_image_width = Some(20_000);
+    limits.max_image_height = Some(20_000);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    Some(img.thumbnail(size, size).to_rgba8())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trashinfo_round_trip() {
+        let body = format!(
+            "[Trash Info]\nPath={}\nDeletionDate={}\n",
+            trash_encode(Path::new("/tmp/a b/ü.txt")),
+            now_iso()
+        );
+        let (p, when) = parse_trashinfo(&body).unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/a b/ü.txt"));
+        let d = crate::secs_apart(when, std::time::SystemTime::now());
+        assert!(d < 5.0, "{d}");
+        assert_eq!(
+            parse_iso("1970-01-02T00:00:10"),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_410))
+        );
+        assert_eq!(
+            parse_iso("2024-03-01T00:00:00"),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_709_251_200))
+        );
+        assert!(parse_trashinfo("[Trash Info]\nPath=%zz\n").is_none());
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("grids_other_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn copy_into_same_folder_gets_copy_names() {
+        let d = scratch("copy");
+        std::fs::write(d.join("a.txt"), "a").unwrap();
+        std::fs::create_dir(d.join("dir")).unwrap();
+        std::fs::write(d.join("dir/x"), "x").unwrap();
+        copy(&[d.join("a.txt"), d.join("dir")], &d).unwrap();
+        copy(&[d.join("a.txt")], &d).unwrap();
+        assert!(d.join("a - 副本.txt").is_file());
+        assert!(d.join("a - 副本 (2).txt").is_file());
+        assert!(d.join("dir - 副本/x").is_file());
+        assert!(
+            copy(&[d.join("dir")], &d.join("dir")).is_err(),
+            "into itself"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn move_and_clash() {
+        let d = scratch("move");
+        std::fs::create_dir_all(d.join("to")).unwrap();
+        std::fs::write(d.join("a.txt"), "new").unwrap();
+        std::fs::write(d.join("to/a.txt"), "old").unwrap();
+        move_(&[d.join("a.txt")], &d.join("to")).unwrap();
+        assert!(!d.join("a.txt").exists());
+        assert_eq!(std::fs::read_to_string(d.join("to/a.txt")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(d.join("to/a - 副本.txt")).unwrap(),
+            "new"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn clipboard_round_trip() {
+        clipboard_set_files(&[PathBuf::from("/tmp/x")], true).unwrap();
+        assert_eq!(
+            clipboard_get_files(),
+            Some((vec![PathBuf::from("/tmp/x")], true))
+        );
+        clipboard_set_files(&[], false).unwrap();
+        assert_eq!(clipboard_get_files(), None);
+    }
+
+    #[test]
+    fn user_dirs_parse() {
+        let home = Path::new("/home/u");
+        let text = "# comment\nXDG_DESKTOP_DIR=\"$HOME/桌面\"\nXDG_DOWNLOAD_DIR=\"/data/dl\"\nXDG_PICTURES_DIR=\"$HOME/\"\n";
+        assert_eq!(
+            parse_user_dir(text, "XDG_DESKTOP_DIR", home),
+            Some(PathBuf::from("/home/u/桌面"))
+        );
+        assert_eq!(
+            parse_user_dir(text, "XDG_DOWNLOAD_DIR", home),
+            Some(PathBuf::from("/data/dl"))
+        );
+        assert_eq!(parse_user_dir(text, "XDG_PICTURES_DIR", home), None);
+        assert_eq!(parse_user_dir(text, "XDG_DOCUMENTS_DIR", home), None);
+    }
+
+    #[test]
+    fn symlinks_resolve() {
+        let d = scratch("links");
+        std::fs::create_dir(d.join("dir")).unwrap();
+        std::fs::write(d.join("f.txt"), "x").unwrap();
+        create_link(&d.join("to_dir"), &d.join("dir")).unwrap();
+        create_link(&d.join("to_file"), Path::new("f.txt")).unwrap(); // relative
+        create_link(&d.join("to_none"), &d.join("gone")).unwrap();
+        assert_eq!(
+            resolve_link(&d.join("to_dir")).unwrap(),
+            LinkTarget::Folder(d.join("dir"))
+        );
+        assert_eq!(
+            resolve_link(&d.join("to_file")).unwrap(),
+            LinkTarget::File(d.join("f.txt"))
+        );
+        assert_eq!(
+            resolve_link(&d.join("to_none")).unwrap(),
+            LinkTarget::Missing(d.join("gone"))
+        );
+        assert_eq!(resolve_link(&d.join("f.txt")).unwrap(), LinkTarget::Other);
+        assert!(resolve_link(&d.join("nothing")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn trash_paths() {
+        assert_eq!(trash_encode(Path::new("/a b/文")), "/a%20b/%E6%96%87");
+        assert_eq!(now_iso().len(), 19);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn recycle_to_xdg_trash() {
+        let d = scratch("trash");
+        let data = d.join("data");
+        // SAFETY: tests touching XDG_DATA_HOME run in this one test only
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
+        std::fs::write(d.join("gone.txt"), "x").unwrap();
+        recycle(&[d.join("gone.txt")], false).unwrap();
+        assert!(!d.join("gone.txt").exists());
+        if !cfg!(target_os = "macos") {
+            assert!(data.join("Trash/files/gone.txt").is_file());
+            let info = std::fs::read_to_string(data.join("Trash/info/gone.txt.trashinfo")).unwrap();
+            assert!(info.contains("Path=/") && info.contains("DeletionDate="));
+        }
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod thumb_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_common_images() {
+        let d = std::env::temp_dir().join(format!("grids_thumb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let img = RgbaImage::from_fn(400, 200, |x, _| image::Rgba([(x % 256) as u8, 0, 0, 255]));
+        for ext in ["png", "jpg", "bmp", "gif", "webp"] {
+            let p = d.join(format!("a.{ext}"));
+            let saved = if ext == "jpg" {
+                image::DynamicImage::ImageRgba8(img.clone())
+                    .to_rgb8()
+                    .save(&p)
+            } else {
+                img.save(&p)
+            };
+            if saved.is_err() {
+                continue; // no encoder for this format: decoding is what matters
+            }
+            let t = thumbnail(&p, 100).unwrap_or_else(|| panic!("{ext}"));
+            assert_eq!(t.dimensions(), (100, 50), "{ext}");
+        }
+        std::fs::write(d.join("a.txt"), "x").unwrap();
+        assert!(thumbnail(&d.join("a.txt"), 100).is_none());
+        std::fs::write(d.join("bad.png"), "not a png").unwrap();
+        assert!(thumbnail(&d.join("bad.png"), 100).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
