@@ -1,6 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 //! Grids: a multi-pane file manager drawn with GPUI.
 
+mod app_icon;
 mod assets;
 mod input;
 mod menu;
@@ -47,6 +48,7 @@ fn main() {
         );
         if let Ok(handle) = window {
             let _ = handle.update(cx, |_, window, cx| {
+                app_icon::apply(ui::hwnd(window));
                 let ws = cx.entity();
                 window.on_window_should_close(cx, move |window, cx| {
                     let b = window.bounds().size;

@@ -433,3 +433,9 @@ pub fn header_icon(id: impl Into<ElementId>, name: &'static str, size: f32, glyp
     div().id(id).no_drag().size(px(size)).rounded(px(8.)).flex_none().flex().items_center().justify_center().cursor_pointer()
         .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())).child(icon(name, glyph, Theme::icon()))
 }
+
+/// The native window handle on Windows; 0 elsewhere (GPUI's X11 window
+/// panics when asked for its handle).
+pub fn hwnd(window: &Window) -> isize {
+    if cfg!(windows) { grids_shell::hwnd_of(window) } else { 0 }
+}

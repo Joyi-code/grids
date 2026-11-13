@@ -119,7 +119,9 @@ Needs the Rust GNU toolchain (`x86_64-pc-windows-gnu`) and MSYS2's MinGW tools (
 build.cmd
 ```
 
-This builds `target\release\grids.exe` and copies it to `grids.exe` in the project folder. `icon.py` redraws the app icon (`app.ico`).
+This builds `target\release\grids.exe` and copies it to `grids.exe` in the project folder.
+
+The app icon (`assets/icon/`: `grids.ico` with 16–256 px, PNGs up to 1024 px) was generated with AI for this project; `build.rs` embeds it in `grids.exe` as icon resource 1.
 
 ## Credits
 

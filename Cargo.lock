@@ -2357,6 +2357,7 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "embed-resource",
  "futures",
  "gpui",
  "grids_core",

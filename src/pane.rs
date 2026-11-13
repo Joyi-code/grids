@@ -696,7 +696,7 @@ impl PaneView {
     /// Carries out a menu command.
     fn run_cmd(&mut self, cmd: Cmd, row: Option<usize>, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let en = state::en(cx);
-        let hwnd = grids_shell::hwnd_of(window);
+        let hwnd = crate::ui::hwnd(window);
         let toast = move |this: &mut Self, r: std::io::Result<()>, cx: &mut Context<Self>| if let Err(e) = r && e.kind() != std::io::ErrorKind::Interrupted { let _ = this; cx.emit(PaneEvent::Toast(e.to_string())) };
         let bg = |this: &mut Self, f: Box<dyn FnOnce() -> std::io::Result<()> + Send>, cx: &mut Context<Self>| {
             let _ = this;
@@ -781,7 +781,7 @@ impl PaneView {
     fn native_menu(&mut self, on_items: bool, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let targets = self.state.targets();
         let folder = self.state.path.clone();
-        let hwnd = grids_shell::hwnd_of(window);
+        let hwnd = crate::ui::hwnd(window);
         let scale = window.scale_factor();
         let origin = window.bounds().origin;
         let screen = ((f32::from(origin.x + pos.x) * scale) as i32, (f32::from(origin.y + pos.y) * scale) as i32);

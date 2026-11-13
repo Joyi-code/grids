@@ -29,9 +29,10 @@ notify = { version = "8", default-features = false }
 futures = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_UI_HiDpi"] }
 
 [build-dependencies]
+embed-resource = "3.0.12"
 
 # GPUI 0.2.2 and taffy 0.9.0 with quiet-md's local patches (see vendor/PATCHES.md).
 [patch.crates-io]

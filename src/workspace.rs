@@ -347,7 +347,7 @@ impl Workspace {
             .title_bar()
             .when(!sidebar_open, |d| d.child(
                 header_icon("open-sidebar", "panel-left-open", 28., 17.).mr(px(10.))
-                    .tip(tr(cx, "显示侧栏", "Show sidebar"), Some("Ctrl+B"))
+                    .tip(tr(cx, "展开侧栏", "Show sidebar"), Some("Ctrl+B"))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             ))
             .child(div().flex_none().max_w(px(260.)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(17.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child(ui_text(title)))
@@ -576,8 +576,8 @@ impl Workspace {
             .child(
                 // The sidebar's own header row: the toggle, level with the plane's title.
                 div().h(px(HEADER_H)).flex_none().flex().items_center().pl(px(16.)).title_bar()
-                    .child(header_icon("toggle-sidebar", "panel-left-close", 28., 17.).tip(tr(cx, "隐藏侧栏", "Hide sidebar"), Some("Ctrl+B")).on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))))
-                    .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(icon("layout-grid", 16., Theme::icon())).child(div().font_weight(FontWeight::SEMIBOLD).child("Grids"))),
+                    .child(header_icon("toggle-sidebar", "panel-left-close", 28., 17.).tip(tr(cx, "收起侧栏", "Hide sidebar"), Some("Ctrl+B")).on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))))
+                    .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(img("icon/grids-48.png").size(px(20.)).flex_none()).child(div().font_weight(FontWeight::SEMIBOLD).child("Grids"))),
             )
             .child(col)
             .child(

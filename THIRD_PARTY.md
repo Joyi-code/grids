@@ -2,6 +2,11 @@
 
 Grids is MIT licensed (see `LICENSE`). It includes or adapts the following.
 
+## App icon
+
+The Grids icon in `assets/icon/` was generated with AI for this project and is
+covered by Grids' own MIT licence. It replaces the earlier `app.ico`.
+
 ## quiet-md (MIT)
 
 Copyright (c) 2026 s1dashu. https://github.com/s1dashu/quiet-md
