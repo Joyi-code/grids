@@ -6,6 +6,7 @@ use crate::format::Lang;
 use crate::layout::Layout;
 use crate::pane::SortKey;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -87,12 +88,35 @@ impl ViewMode {
     }
 }
 
+/// At most this many link groups per session.
+pub const MAX_LINK_GROUPS: usize = 4;
+
+/// One pane in a link group, with the folder it was in when linked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LinkMember {
+    /// Index into [`Session::panes`].
+    pub pane: usize,
+    pub base: PathBuf,
+}
+
+/// Panes that navigate together (relative to each one's `base`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LinkGroup {
+    pub members: Vec<LinkMember>,
+    /// Compare mode (only meaningful with exactly two members).
+    pub compare: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Session {
     pub layout: Layout,
     pub panes: Vec<PaneSave>,
     pub active: usize,
+    /// Link groups; group `i` has colour `i`. A pane is in at most one.
+    pub links: Vec<LinkGroup>,
 }
 
 impl Session {
@@ -124,8 +148,34 @@ impl Session {
             p.columns = p.columns.clone().clamped();
         }
         if self.active >= n { self.active = 0; }
+        self.links = normalized_links(std::mem::take(&mut self.links), n);
         self
     }
+}
+
+/// Drops members whose pane is gone, a pane's later memberships, groups left
+/// with fewer than two panes, compare on groups not of two, and groups past
+/// [`MAX_LINK_GROUPS`].
+fn normalized_links(groups: Vec<LinkGroup>, panes: usize) -> Vec<LinkGroup> {
+    let mut used = vec![false; panes];
+    let mut out = Vec::new();
+    for mut g in groups {
+        g.members.retain(|m| match used.get_mut(m.pane) {
+            Some(u) if !*u && !m.base.as_os_str().is_empty() => { *u = true; true }
+            _ => false,
+        });
+        if g.members.len() < 2 {
+            for m in &g.members { used[m.pane] = false; }
+            continue;
+        }
+        if out.len() == MAX_LINK_GROUPS {
+            for m in &g.members { used[m.pane] = false; }
+            continue;
+        }
+        g.compare &= g.members.len() == 2;
+        out.push(g);
+    }
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,11 +210,19 @@ pub struct Config {
     pub session_name: Option<String>,
     /// Window size in logical px.
     pub window: Option<(f32, f32)>,
+    /// Locked folders (see [`crate::locked`]).
+    pub locked: Vec<PathBuf>,
+    /// The shelf: files collected for a later copy / move.
+    pub shelf: Vec<PathBuf>,
+    /// Folder notes keyed by [`crate::notes::note_key`].
+    pub notes: BTreeMap<String, String>,
+    /// Visited folders for frecency (see [`crate::frecency`]).
+    pub recent: Vec<crate::frecency::Recent>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { version: 1, lang: Lang::Zh, appearance: Appearance::System, sidebar_open: true, sidebar_width: 220., favourites: vec![], current: Session::default(), sessions: vec![], session_name: None, window: None }
+        Self { version: 1, lang: Lang::Zh, appearance: Appearance::System, sidebar_open: true, sidebar_width: 220., favourites: vec![], current: Session::default(), sessions: vec![], session_name: None, window: None, locked: vec![], shelf: vec![], notes: BTreeMap::new(), recent: vec![] }
     }
 }
 
@@ -231,7 +289,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(FILE_NAME);
         let mut c = Config::default();
-        c.current = Session { layout: Layout::new(3, 3), panes: vec![], active: 4 }.normalized(Path::new("/home"));
+        c.current = Session { layout: Layout::new(3, 3), panes: vec![], active: 4, ..Default::default() }.normalized(Path::new("/home"));
         c.current.panes[2].sort = SortKey::Size;
         c.current.panes[2].columns.name = 300.;
         c.toggle_favourite(Path::new("/tmp"));
@@ -251,6 +309,32 @@ mod tests {
         assert_eq!((s.layout.cols.clone(), s.panes.len()), (vec![2; 4], 8));
         assert_eq!(s.panes[7].path, PathBuf::from("/h"));
         assert_eq!(Config::load(Path::new("/nonexistent/x.json")), Config::default());
+    }
+
+    #[test]
+    fn v09_fields_default_and_links_normalize() {
+        let c: Config = serde_json::from_str(r#"{"favourites": ["/f"]}"#).unwrap();
+        assert!(c.locked.is_empty() && c.shelf.is_empty() && c.notes.is_empty() && c.recent.is_empty());
+        assert!(c.current.links.is_empty());
+        let m = |pane: usize, base: &str| LinkMember { pane, base: base.into() };
+        let g = |members: Vec<LinkMember>, compare: bool| LinkGroup { members, compare };
+        let mut s = Session { layout: Layout::default(), ..Default::default() };
+        let n = s.layout.count();
+        assert!(n >= 2);
+        s.links = vec![
+            g(vec![m(0, "/a"), m(1, "/b")], true),
+            g(vec![m(1, "/x"), m(99, "/y")], false), // pane 1 taken, 99 gone: dropped
+            g(vec![m(0, "/a")], false),
+        ];
+        let s = s.normalized(Path::new("/h"));
+        assert_eq!(s.links, vec![g(vec![m(0, "/a"), m(1, "/b")], true)]);
+        let mut c = Config::default();
+        c.locked.push("/l".into());
+        c.notes.insert("/n".into(), "hi".into());
+        c.recent.push(crate::frecency::Recent { path: "/r".into(), count: 2, last: 5 });
+        c.current = s;
+        let back: Config = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]
