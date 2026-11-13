@@ -599,24 +599,39 @@ fn file_op(
 }
 
 pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
-    let arr = items(paths)?;
-    file_op(
-        FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_WANTNUKEWARNING | FOFX_ADDUNDORECORD,
-        |op| unsafe { op.DeleteItems(&arr) }.map_err(win_err),
-    )
+    recycle_with(paths, FILEOPERATION_FLAGS(0))
 }
 
 pub fn delete(paths: &[PathBuf]) -> io::Result<()> {
-    let arr = items(paths)?;
-    file_op(FILEOPERATION_FLAGS(0), |op| {
-        unsafe { op.DeleteItems(&arr) }.map_err(win_err)
-    })
+    delete_with(paths, FILEOPERATION_FLAGS(0))
 }
 
 pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+    copy_with(paths, dest, FILEOPERATION_FLAGS(0))
+}
+
+pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+    move_with(paths, dest, FILEOPERATION_FLAGS(0))
+}
+
+// `extra`: FOF_NO_UI in the tests, so no dialog can wait for a click on the CI runner.
+
+fn recycle_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<()> {
+    let arr = items(paths)?;
+    let flags =
+        FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_WANTNUKEWARNING | FOFX_ADDUNDORECORD | extra;
+    file_op(flags, |op| unsafe { op.DeleteItems(&arr) }.map_err(win_err))
+}
+
+fn delete_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<()> {
+    let arr = items(paths)?;
+    file_op(extra, |op| unsafe { op.DeleteItems(&arr) }.map_err(win_err))
+}
+
+fn copy_with(paths: &[PathBuf], dest: &Path, extra: FILEOPERATION_FLAGS) -> io::Result<()> {
     // into the folder they already sit in: Explorer's "名称 - 副本" names; else its conflict dialog
     let same = paths.iter().all(|p| parent_is(p, dest));
-    let mut flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD;
+    let mut flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD | extra;
     if same {
         flags |= FOF_RENAMEONCOLLISION;
     }
@@ -626,10 +641,10 @@ pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
     })
 }
 
-pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+fn move_with(paths: &[PathBuf], dest: &Path, extra: FILEOPERATION_FLAGS) -> io::Result<()> {
     let (arr, to) = (items(paths)?, item(dest)?);
     file_op(
-        FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD,
+        FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD | extra,
         |op| unsafe { op.MoveItems(&arr, &to) }.map_err(win_err),
     )
 }
@@ -880,19 +895,22 @@ mod tests {
 
     #[test]
     fn file_ops_round_trip() {
+        use windows::Win32::UI::Shell::FOF_NO_UI;
         let d = std::env::temp_dir().join(format!("grids_win_ops_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("to")).unwrap();
+        std::fs::create_dir_all(d.join("sub")).unwrap();
         std::fs::write(d.join("a.txt"), "a").unwrap();
-        copy(&[d.join("a.txt")], &d.join("to")).unwrap();
+        copy_with(&[d.join("a.txt")], &d.join("to"), FOF_NO_UI).unwrap();
         assert!(d.join("to").join("a.txt").is_file());
-        copy(&[d.join("a.txt")], &d).unwrap(); // same folder: renamed copy
-        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 3);
-        std::fs::create_dir(d.join("sub")).unwrap();
-        move_(&[d.join("a.txt")], &d.join("sub")).unwrap();
+        copy_with(&[d.join("a.txt")], &d, FOF_NO_UI).unwrap(); // same folder: renamed copy
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 4);
+        move_with(&[d.join("a.txt")], &d.join("sub"), FOF_NO_UI).unwrap();
         assert!(d.join("sub").join("a.txt").is_file() && !d.join("a.txt").exists());
-        delete(&[d.join("to")]).unwrap();
+        delete_with(&[d.join("to")], FOF_NO_UI).unwrap();
         assert!(!d.join("to").exists());
+        recycle_with(&[d.join("sub")], FOF_NO_UI).unwrap();
+        assert!(!d.join("sub").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

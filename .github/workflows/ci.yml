@@ -50,7 +50,9 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
+      # shell tests drive the real Windows Shell; a dialog waiting for a click must not eat the job
       - name: Test
+        timeout-minutes: 15
         run: cargo test --release --locked --workspace
 
       - name: Clippy (Windows platform layer)
