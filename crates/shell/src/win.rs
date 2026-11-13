@@ -792,7 +792,9 @@ fn item_done(hr: HRESULT) -> bool {
 /// Collects what an IFileOperation actually did (IFileOperationProgressSink).
 #[implement(IFileOperationProgressSink)]
 struct OpSink {
-    done: std::rc::Rc<RefCell<Vec<(PathBuf, Option<PathBuf>)>>>,
+    /// (source, result, sure): `sure` false for a delete the shell answered
+    /// with another success code; it counts only if the source is gone after.
+    done: std::rc::Rc<RefCell<Vec<(PathBuf, Option<PathBuf>, bool)>>>,
 }
 
 impl OpSink {
@@ -807,7 +809,10 @@ impl OpSink {
         let dst = new.as_ref().and_then(fs_path);
         #[cfg(test)]
         println!("  sink: hr={:#010x} src={src:?} new={dst:?}", hr.0 as u32);
-        if !item_done(hr) {
+        // a folder delete reports COPYENGINE_S_NOT_HANDLED for the folder
+        // itself before deleting its contents
+        let sure = item_done(hr);
+        if !sure && (need_new || hr.is_err()) {
             return;
         }
         let Some(src) = src else {
@@ -816,7 +821,7 @@ impl OpSink {
         if need_new && dst.is_none() {
             return;
         }
-        self.done.borrow_mut().push((src, dst));
+        self.done.borrow_mut().push((src, dst, sure));
     }
 }
 
@@ -962,10 +967,13 @@ fn file_op(
     drop(sink);
     let collected = log.take();
     let mut seen = vec![false; paths.len()];
-    for (src, dst) in collected {
+    for (src, dst, sure) in collected {
         let Some(i) = long.iter().position(|p| crate::same_path(p, &src)) else {
             continue;
         };
+        if !sure && std::fs::symlink_metadata(&src).is_ok() {
+            continue;
+        }
         match seen.get_mut(i) {
             Some(s) if !*s => *s = true,
             _ => continue,
