@@ -19,6 +19,7 @@ static FILES: &[(&str, &[u8])] = icons![
     "star-fill", "sun", "sun-moon", "trash-2", "x", "star-off", "folder-search", "square-split-horizontal", "link", "info",
     "terminal", "list", "layout-list", "grid-2x2", "lock", "lock-open", "inbox", "folder-input", "sticky-note",
     "calendar-clock", "locate", "history", "text-cursor-input", "list-checks", "table-2", "arrow-right-left",
+    "unlink", "git-compare", "folder-x", "undo-2", "shield-alert", "file-lock", "power", "octagon-x",
 ];
 
 /// The app icon, drawn beside "Grids" in the sidebar (48px, shown at 20).
@@ -45,7 +46,7 @@ mod tests {
     /// a missing one draws nothing (the hidden sidebar toggle was one).
     #[test]
     fn icons_used_are_bundled() {
-        let srcs = [include_str!("pane.rs"), include_str!("workspace.rs"), include_str!("ui.rs"), include_str!("menu.rs"), include_str!("workspace/palette.rs"), include_str!("workspace/today.rs")];
+        let srcs = [include_str!("pane.rs"), include_str!("workspace.rs"), include_str!("ui.rs"), include_str!("menu.rs"), include_str!("workspace/palette.rs"), include_str!("workspace/today.rs"), include_str!("workspace/link.rs")];
         let mut missing = vec![];
         for src in srcs {
             for (pat, skip) in [("icon(\"", 0), ("header_icon(", 1), ("glyph: \"", 0)] {

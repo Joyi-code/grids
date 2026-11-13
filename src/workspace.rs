@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+mod link;
 mod palette;
 mod today;
 
@@ -201,6 +202,8 @@ impl Workspace {
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
         me.set_active(me.active, window, cx);
+        cx.global_mut::<Shared>().config.current.links = session.links.clone();
+        me.sync_links(cx);
         me.recheck_shelf(cx);
         me._subs.push(cx.observe_window_appearance(window, |this, window, cx| { this.apply_theme(window, cx) }));
         me.apply_theme(window, cx);
@@ -228,6 +231,9 @@ impl Workspace {
                 for d in dirs { this.today_disk_changed(d, cx) }
             }
             PaneEvent::DiskChanged(dir) => this.today_disk_changed(dir, cx),
+            PaneEvent::Moved(path) => if let Some(i) = this.panes.iter().position(|p| p == pane) { this.link_moved(i, path, cx) },
+            PaneEvent::Listed => if !state::shared(cx).config.current.links.is_empty() { this.sync_links(cx) },
+            PaneEvent::Link(c) => if let Some(i) = this.panes.iter().position(|p| p == pane) { this.link_cmd(i, c, cx) },
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
             PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
             PaneEvent::ToggleMaximize => {
@@ -341,6 +347,8 @@ impl Workspace {
         self._subs.retain(|_| false);
         self._subs.push(cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)));
         self.panes = session.panes.iter().enumerate().map(|(i, p)| self.make_pane(i, p, window, cx)).collect();
+        cx.global_mut::<Shared>().config.current.links = session.links.clone();
+        self.sync_links(cx);
         self.set_active(session.active, window, cx);
     }
 
@@ -390,6 +398,7 @@ impl Workspace {
         let i = self.active;
         self.panes.swap(i, j);
         for k in [i, j] { self.panes[k].update(cx, |p, cx| { p.index = k; cx.notify() }) }
+        self.remap_links(|k| Some(if k == i { j } else if k == j { i } else { k }), cx);
         self.maximized = None;
         self.sync_max(cx);
         self.set_active(j, window, cx);
@@ -404,6 +413,7 @@ impl Workspace {
     fn apply_layout_keep_picker(&mut self, new: Layout, window: &mut Window, cx: &mut Context<Self>) {
         if new.cols == self.layout.cols { cx.notify(); return }
         let carry = new.carry_from(&self.layout);
+        let back: Vec<Option<usize>> = carry.clone();
         let old = std::mem::take(&mut self.panes);
         let base = old.get(self.active).map(|p| p.read(cx).save()).unwrap_or_default();
         let mut active = 0;
@@ -420,6 +430,7 @@ impl Workspace {
         }
         self.panes = panes;
         self.layout = new;
+        self.remap_links(|old| back.iter().position(|&f| f == Some(old)), cx);
         self.maximized = None;
         self.sync_max(cx);
         self.set_active(active, window, cx);

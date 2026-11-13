@@ -65,6 +65,8 @@ pub enum Cmd {
     Terminal,
     CopyFolderPath,
     View(grids_core::ViewMode),
+    /// Pane title menu: link with pane N, leave the group, compare on/off.
+    Link(crate::pane::LinkCmd),
 }
 
 #[derive(Clone)]

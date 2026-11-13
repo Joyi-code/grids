@@ -298,6 +298,15 @@ impl Theme {
     /// saturated on the dark page.
     pub fn danger() -> Hsla { if dark() { rgb(0xc4574f).into() } else { rgb(0xd92d20).into() } }
     pub fn danger_hover() -> Hsla { if dark() { rgb(0xb24c45).into() } else { rgb(0xc0261a).into() } }
+    /// Compare: only on this side (green) / same name, differs (amber).
+    pub fn added() -> Hsla { if dark() { rgb(0x4fb477).into() } else { rgb(0x16a34a).into() } }
+    pub fn changed() -> Hsla { if dark() { rgb(0xd9a441).into() } else { rgb(0xd97706).into() } }
+    /// Link-group dot colours (blue, violet, teal, rose).
+    pub fn link(i: usize) -> Hsla {
+        let lt = [0x2f6fed, 0x8b5cf6, 0x0d9488, 0xe11d74];
+        let dk = [0x5b8ff5, 0xa58bf7, 0x2bb3a6, 0xee5a97];
+        rgb(if dark() { dk[i % 4] } else { lt[i % 4] }).into()
+    }
     /// The keyboard focus ring on dialog buttons.
     pub fn focus_ring() -> Hsla { ca(craft::B500, 0.55) }
 }

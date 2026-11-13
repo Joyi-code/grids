@@ -137,6 +137,47 @@ pub enum PaneEvent {
     EditNote(PathBuf),
     /// The watcher saw entries change in this folder (the Today view rescans).
     DiskChanged(PathBuf),
+    /// The pane went to another folder (linked panes follow).
+    Moved(PathBuf),
+    /// A listing came in (compare marks are worked out again).
+    Listed,
+    /// A link-group command from the title menu.
+    Link(LinkCmd),
+}
+
+/// What the title menu asks of the link groups.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LinkCmd {
+    /// Link this pane with pane N (0-based).
+    With(usize),
+    Unlink,
+    Compare(bool),
+    /// Create the missing counterpart folder and go there.
+    CreateMissing,
+}
+
+/// How a compared entry differs from the other side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// No entry of that name over there.
+    Only,
+    /// Same name, other size or date.
+    Differs,
+}
+
+/// The pane's place in a link group, set by the workspace.
+#[derive(Clone, Default)]
+pub struct LinkView {
+    /// Group number (colour).
+    pub group: usize,
+    /// Inside its base folder; false: paused (hollow dot).
+    pub live: bool,
+    pub compare: bool,
+    /// The group has exactly two panes.
+    pub can_compare: bool,
+    /// The counterpart folder the group wanted to show is missing.
+    pub missing: Option<PathBuf>,
+    pub marks: Rc<HashMap<String, Mark>>,
 }
 
 /// Files dragged from a pane.
@@ -230,6 +271,10 @@ pub struct PaneView {
     /// A first click on the breadcrumbs waits briefly for a second one
     /// (double-click maximizes) before opening the address field.
     addr_click: Option<Task<()>>,
+    /// Link group membership (None: not linked).
+    pub link: Option<LinkView>,
+    /// Panes in the grid, for the title menu.
+    pub pane_count: usize,
 }
 
 impl EventEmitter<PaneEvent> for PaneView {}
@@ -276,6 +321,8 @@ impl PaneView {
             listed: None,
             maximized: None,
             addr_click: None,
+            link: None,
+            pane_count: 1,
         };
         me.load(None, cx);
         me
@@ -318,6 +365,7 @@ impl PaneView {
                         let mut jump = select.is_some();
                         if let Some(names) = this.pending_select.take() { this.state.select_names(&names); jump = true }
                         if let Some(r) = this.state.cursor.filter(|_| jump) { this.reveal(r, ScrollStrategy::Center) }
+                        cx.emit(PaneEvent::Listed);
                     }
                     Err(e) => this.state.set_error(error_text(&e, state::en(cx))),
                 }
@@ -406,6 +454,16 @@ impl PaneView {
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.load(select, cx);
         cx.emit(PaneEvent::Changed);
+        cx.emit(PaneEvent::Moved(self.state.path.clone()));
+    }
+
+    /// The last listing (all entries, unfiltered) and its folder.
+    pub fn listing(&self) -> Option<(&Path, &[Entry])> { self.listed.as_deref().map(|p| (p, self.prev.as_slice())) }
+
+    /// Compare tint for an entry.
+    fn mark_wash(&self, name: &str) -> Option<Hsla> {
+        let l = self.link.as_ref().filter(|l| l.compare)?;
+        Some(match l.marks.get(name)? { Mark::Only => Theme::added().alpha(0.16), Mark::Differs => Theme::changed().alpha(0.18) })
     }
 
     fn close_editors(&mut self) {
@@ -983,6 +1041,31 @@ impl PaneView {
         cx.notify();
     }
 
+    /// The title menu: link with another pane, compare, unlink.
+    fn link_menu(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let en = state::en(cx);
+        let t = move |zh: &'static str, e: &'static str| -> SharedString { (if en { e } else { zh }).into() };
+        let others: Vec<Item> = (0..self.pane_count).filter(|&j| j != self.index)
+            .map(|j| Item::row(if en { format!("Pane {}", j + 1) } else { format!("格子 {}", j + 1) }, "layout-grid", "", Cmd::Link(LinkCmd::With(j)))).collect();
+        let mut items = vec![Item::sub(t("联动到", "Link with"), "link", others).enabled(self.pane_count > 1)];
+        if let Some(l) = &self.link {
+            items.push(Item::check(t("对比两侧差异", "Compare both sides"), l.compare, "", Cmd::Link(LinkCmd::Compare(!l.compare))).enabled(l.can_compare));
+            items.push(Item::Sep);
+            items.push(Item::row(t("取消联动", "Unlink"), "unlink", "", Cmd::Link(LinkCmd::Unlink)));
+        }
+        let menu = cx.new(|cx| MenuView::new(items, pos, 200., cx));
+        let sub = cx.subscribe_in(&menu, window, move |this, _, ev: &MenuEvent, window, cx| {
+            this.menu = None;
+            window.focus(&this.focus);
+            if let MenuEvent::Pick(cmd) = ev { this.run_cmd(cmd.clone(), None, pos, window, cx) }
+            cx.notify();
+        });
+        let mf = menu.read(cx).focus.clone();
+        window.defer(cx, move |window, _| mf.focus(window));
+        self.menu = Some((menu, sub));
+        cx.notify();
+    }
+
     /// Carries out a menu command.
     fn run_cmd(&mut self, cmd: Cmd, row: Option<usize>, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let en = state::en(cx);
@@ -1012,6 +1095,7 @@ impl PaneView {
             Cmd::CopyPath => self.copy_paths(cx),
             Cmd::Shelve => self.shelve(cx),
             Cmd::EditNote(p) => cx.emit(PaneEvent::EditNote(p)),
+            Cmd::Link(c) => cx.emit(PaneEvent::Link(c)),
             Cmd::Rename => self.start_rename(window, cx),
             Cmd::Delete => self.ask_delete(false, cx),
             Cmd::Zip => if let Some(p) = first && !self.refuse_locked(std::slice::from_ref(&dir), cx) {
@@ -1139,7 +1223,7 @@ impl PaneView {
 }
 
 const CHEVRON_W: f32 = 14.;
-const FOLD_W: f32 = 18. + CHEVRON_W;
+const FOLD_W: f32 = 22. + CHEVRON_W;
 
 /// Rough width of a breadcrumb chip (label + padding): CJK about 1em,
 /// other text about 0.62em, rounded up so a fold happens before a cut.
@@ -1281,7 +1365,7 @@ impl PaneView {
             let mut skip = 0;
             if avail > 0. {
                 let mut total: f32 = widths.iter().sum();
-                while skip + 1 < n && total > avail {
+                while skip + 1 < n && total > avail - 8. {
                     total -= widths[skip];
                     if skip == 0 { total += FOLD_W }
                     skip += 1;
@@ -1373,6 +1457,20 @@ impl PaneView {
                 window.refresh();
             }));
         let (lock_out, lock_in) = if locked { (Some(lock_btn), None) } else { (None, Some(lock_btn)) };
+        // Link group: a dot in the group's colour, hollow while paused.
+        let link_dot = self.link.as_ref().map(|l| {
+            let c = Theme::link(l.group);
+            let tip: SharedString = match (l.live, l.compare) {
+                (false, _) => t("联动已暂停：已离开基准文件夹，回到其中自动恢复", "Link paused: outside the base folder; resumes inside it").into(),
+                (true, true) => t("联动中 · 对比差异（绿色：仅此侧有，琥珀色：有差别）", "Linked · comparing (green: only here, amber: differs)").into(),
+                (true, false) => if en { format!("Linked (group {})", l.group + 1) } else { format!("联动中（第 {} 组）", l.group + 1) }.into(),
+            };
+            div().id("link-dot").flex_none().size(px(18.)).flex().items_center().justify_center().cursor_pointer()
+                .map(|d| if l.compare && l.live { d.child(icon("git-compare", 14., c)) } else { d.child(div().size(px(9.)).rounded_full().border(px(1.5)).border_color(c).when(l.live, |d| d.bg(c))) })
+                .tip(&tip, None)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| { cx.stop_propagation(); this.link_menu(ev.position(), window, cx) }))
+        });
         div()
             .id("pane-head")
             .h(px(HEAD_H))
@@ -1383,7 +1481,9 @@ impl PaneView {
             .pl(px(12.))
             .pr(px(8.))
             .on_click(cx.listener(|_, ev: &ClickEvent, _, cx| if ev.click_count() == 2 { cx.emit(PaneEvent::ToggleMaximize) }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| { cx.stop_propagation(); cx.emit(PaneEvent::Activated); this.link_menu(ev.position, window, cx) }))
             .child(badge)
+            .children(link_dot)
             .children(max_tag)
             .children(unseen)
             .child(path_area)
@@ -1537,7 +1637,7 @@ impl PaneView {
         let kind = e.kind();
         let renaming = self.rename.as_ref().filter(|rn| rn.path == e.path);
         let name_color = if e.hidden { Theme::text_caption() } else { Theme::text() };
-        let wash = self.fresh_wash(&e.name).filter(|_| !selected);
+        let wash = self.fresh_wash(&e.name).or_else(|| self.mark_wash(&e.name)).filter(|_| !selected);
         let hl = |d: Div| -> Div {
             d.map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
                 .when_some(wash, |d, c| d.bg(c))
@@ -1607,7 +1707,7 @@ impl PaneView {
         });
         let cell = |w: f32, text: String, right: bool| div().flex_none().w(px(w)).px(px(CELL_PAD)).overflow_hidden().whitespace_nowrap().text_ellipsis().when(right, |d| d.flex().justify_end()).child(ui_text(text));
         let size = if e.is_dir { String::new() } else { format::size(e.size, lang) };
-        let wash = self.fresh_wash(&e.name);
+        let wash = self.fresh_wash(&e.name).or_else(|| self.mark_wash(&e.name));
         let row = div()
             .id(("row", r))
             .h(px(ROW_H))
@@ -1686,6 +1786,18 @@ impl Render for PaneView {
         let empty_msg: Option<String> = if let Some(err) = &self.state.error { Some(err.clone()) } else if n == 0 && !self.loading {
             Some(if !self.state.filter.is_empty() { if en { "No matching items." } else { "没有匹配的项目。" } } else if en { "This folder is empty." } else { "此文件夹为空。" }.to_string())
         } else { None };
+        let missing = self.link.as_ref().and_then(|l| l.missing.clone()).map(|m| {
+            div().absolute().inset_0().bg(Theme::bg_body()).flex().flex_col().items_center().justify_center().gap(px(10.)).px(px(16.))
+                .child(icon("folder-x", 28., Theme::icon_muted()))
+                .child(div().text_color(Theme::text()).child(if en { "The matching folder doesn't exist" } else { "对应文件夹不存在" }))
+                .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(Theme::text_caption()).child(ui_text(m.display().to_string())))
+                .child(div().id("create-missing").h(px(30.)).px(px(14.)).rounded(px(8.)).flex().items_center().gap(px(6.)).cursor_pointer()
+                    .bg(Theme::primary()).text_color(gpui::white()).text_size(px(13.))
+                    .hover(|s| s.opacity(0.9))
+                    .child(icon("folder-plus", 14., gpui::white()))
+                    .child(if en { "Create folder" } else { "创建文件夹" })
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Link(LinkCmd::CreateMissing)))))
+        });
         let body = div()
             .id("list-body")
             .relative()
@@ -1702,6 +1814,7 @@ impl Render for PaneView {
             .child(self.ctrl_wheel(cx))
             .child(list)
             .when_some(empty_msg, |d, msg| d.child(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(msg)))
+            .children(missing)
             .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(Theme::drop_target()))
             .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(Theme::drop_target()))
             .on_drop(cx.listener(|this, d: &DraggedFiles, window, cx| this.drop_files(d, None, window, cx)))
