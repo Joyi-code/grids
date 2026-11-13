@@ -2361,6 +2361,7 @@ name = "grids_shell"
 version = "0.8.0"
 dependencies = [
  "image",
+ "raw-window-handle",
  "windows 0.61.3",
 ]
 

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, gpui-rewrite]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    name: Windows x64 release build + tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler (and clippy); rustup installs it here.
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # GPUI's build script compiles its HLSL shaders with fxc.exe from the Windows SDK;
+      # point it at the newest SDK on the runner instead of its one hard-coded version.
+      - name: Locate fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object { [version]($_.Directory.Parent.Name) } -Descending | Select-Object -First 1
+          if (!$fxc) { throw 'fxc.exe not found in the Windows SDK' }
+          Write-Host "fxc: $($fxc.FullName)"
+          "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked --workspace
+
+      - name: Clippy (Windows platform layer)
+        run: cargo clippy --release --locked -p grids_shell --all-targets
+
+      - name: Collect grids.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/grids.exe dist/grids.exe
+          Copy-Item LICENSE dist/
+          if (Test-Path THIRD_PARTY.md) { Copy-Item THIRD_PARTY.md dist/ }
+          (Get-FileHash dist/grids.exe -Algorithm SHA256).Hash | Out-File dist/grids.exe.sha256 -Encoding ascii
+          Get-ChildItem dist
+
+      - name: Upload grids.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: grids-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Linux clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
+
+      - name: Install toolchain
+        run: rustup toolchain install && rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets
+
+      - name: Test
+        run: cargo test --locked --workspace
