@@ -84,3 +84,8 @@ pub fn follow_moves(items: &[OpItem], cx: &mut App) -> bool {
     }
     changed
 }
+
+/// "截图 2026-11-13 153012.png" style names for pasted clipboard content.
+pub fn stamp_name(prefix: &str, ext: &str) -> String {
+    format!("{prefix} {}.{ext}", chrono::Local::now().format("%Y-%m-%d %H%M%S"))
+}

@@ -703,9 +703,11 @@ impl PaneView {
         cx.emit(PaneEvent::Toast(msg));
     }
 
-    pub fn paste(&mut self, cx: &mut Context<Self>) {
+    pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dest = self.state.path.clone();
-        self.paste_into(dest, cx)
+        if self.refuse_locked(std::slice::from_ref(&dest), cx) { return }
+        if state::get_clipboard(cx).is_some() { return self.paste_into(dest, cx) }
+        self.paste_as_file(window, cx)
     }
 
     fn paste_into(&mut self, dest: PathBuf, cx: &mut Context<Self>) {
@@ -714,6 +716,41 @@ impl PaneView {
         let names: Vec<String> = paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         if cut { cx.global_mut::<state::Shared>().clipboard = None }
         self.run_op(if cut { Op::Move } else { Op::Copy }, paths, Some(dest), names, cx);
+    }
+
+    /// Ctrl+V with no files on the clipboard: an image becomes
+    /// 截图 <date time>.png, text becomes 文本 <date time>.txt (UTF-8), then
+    /// the new file is selected with its name ready to edit.
+    fn paste_as_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let en = state::en(cx);
+        // Off Windows the shell can't read the clipboard: GPUI's copy instead.
+        let fallback: Option<Clip> = if cfg!(windows) { None } else {
+            cx.read_from_clipboard().and_then(|item| item.entries().iter().find_map(|e| match e {
+                ClipboardEntry::Image(img) if img.format == ImageFormat::Png => Some(Clip::Png(img.bytes.clone())),
+                ClipboardEntry::String(s) if !s.text().is_empty() => Some(Clip::Text(s.text().to_string())),
+                _ => None,
+            }))
+        };
+        let fail = if en { "Paste failed: " } else { "粘贴失败：" };
+        self.create_then_rename(OpKind::PasteFile, fail, Box::new(move |dir| {
+            let clip = grids_shell::clipboard_image().map(Clip::Image)
+                .or_else(|| grids_shell::clipboard_text().map(Clip::Text))
+                .or(fallback)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, if en { "nothing to paste (no files, image or text on the clipboard)" } else { "剪贴板里没有文件、图片或文字" }))?;
+            let (name, bytes) = match clip {
+                Clip::Image(img) => {
+                    let mut out = std::io::Cursor::new(Vec::new());
+                    img.write_to(&mut out, image::ImageFormat::Png).map_err(std::io::Error::other)?;
+                    (ops::stamp_name(if en { "Screenshot" } else { "截图" }, "png"), out.into_inner())
+                }
+                Clip::Png(b) => (ops::stamp_name(if en { "Screenshot" } else { "截图" }, "png"), b),
+                Clip::Text(t) => (ops::stamp_name(if en { "Text" } else { "文本" }, "txt"), t.into_bytes()),
+            };
+            let path = dir.join(paths::unique_name(dir, &name));
+            // create_new: never overwrite something that appeared meanwhile
+            std::io::Write::write_all(&mut std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?, &bytes)?;
+            Ok(vec![grids_shell::OpItem { src: path.clone(), dst: Some(path), is_dir: false }])
+        }), window, cx);
     }
 
     /// Runs a copy / move / delete on a background thread (Windows shows its
@@ -854,7 +891,9 @@ impl PaneView {
                 Item::sub(t("查看", "View"), "eye", view),
                 Item::row(t("刷新", "Refresh"), "refresh-cw", "F5", Cmd::Refresh),
                 Item::Sep,
-                Item::row(t("粘贴", "Paste"), "clipboard-paste", "Ctrl+V", Cmd::Paste).enabled(can_paste),
+                // No files on the clipboard: Ctrl+V saves an image or text as a file.
+                if can_paste || ro { Item::row(t("粘贴", "Paste"), "clipboard-paste", "Ctrl+V", Cmd::Paste).enabled(can_paste) }
+                else { Item::row(t("粘贴为文件", "Paste as file"), "clipboard-paste", "Ctrl+V", Cmd::Paste) },
                 Item::sub(t("新建", "New"), "plus", if ro { vec![Item::Note(t("只读文件夹", "Read-only folder"))] } else { new_items }),
                 Item::Sep,
                 Item::row(t("在终端中打开", "Open in Terminal"), "terminal", "", Cmd::Terminal),
@@ -942,7 +981,7 @@ impl PaneView {
             Cmd::OpenInNextPane => if let Some(p) = first { cx.emit(PaneEvent::OpenInNext(p)) },
             Cmd::Cut => self.copy_files(true, cx),
             Cmd::Copy => self.copy_files(false, cx),
-            Cmd::Paste => self.paste(cx),
+            Cmd::Paste => self.paste(window, cx),
             Cmd::PasteInto(d) => self.paste_into(d, cx),
             Cmd::CopyPath => self.copy_paths(cx),
             Cmd::Shelve => self.shelve(cx),
@@ -1081,6 +1120,13 @@ const FOLD_W: f32 = 18. + CHEVRON_W;
 fn crumb_width(label: &str, size: f32) -> f32 {
     let em: f32 = label.chars().map(|c| if (c as u32) >= 0x2E80 { 1.0 } else if c.is_ascii_uppercase() || "mwMW".contains(c) { 0.72 } else { 0.58 }).sum();
     em * size + 8. + 2.
+}
+
+/// Clipboard content pasted as a new file.
+enum Clip {
+    Image(image::RgbaImage),
+    Png(Vec<u8>),
+    Text(String),
 }
 
 /// The sticky-note mark beside a folder that has a note; hover shows it.
@@ -1667,7 +1713,7 @@ impl Render for PaneView {
             .on_action(cx.listener(|this, _: &DeletePermanently, _, cx| this.ask_delete(true, cx)))
             .on_action(cx.listener(|this, _: &CopyFiles, _, cx| this.copy_files(false, cx)))
             .on_action(cx.listener(|this, _: &CutFiles, _, cx| this.copy_files(true, cx)))
-            .on_action(cx.listener(|this, _: &PasteFiles, _, cx| this.paste(cx)))
+            .on_action(cx.listener(|this, _: &PasteFiles, window, cx| this.paste(window, cx)))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.load(None, cx)))
             .on_action(cx.listener(|this, _: &NewFolder, window, cx| this.new_folder(window, cx)))
             .on_action(cx.listener(|this, _: &EditAddress, window, cx| this.edit_address(window, cx)))
