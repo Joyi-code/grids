@@ -133,6 +133,8 @@ pub enum PaneEvent {
     RestoreGrid,
     /// An edit was refused in a read-only folder (the locked root).
     Locked(PathBuf),
+    /// Open the note editor for this folder.
+    EditNote(PathBuf),
 }
 
 /// Files dragged from a pane.
@@ -816,6 +818,8 @@ impl PaneView {
             v.push(Item::Sep);
             v.push(Item::row(t("压缩为 ZIP 文件", "Compress to ZIP file"), "file-archive", "", Cmd::Zip).enabled(!ro));
             if let Some(dir) = &folder {
+                let has = grids_core::notes::get(&state::shared(cx).config.notes, dir).is_some();
+                v.push(Item::row(if has { t("编辑备注", "Edit note") } else { t("添加备注", "Add note") }, "sticky-note", "", Cmd::EditNote(dir.clone())));
                 let fav = state::shared(cx).config.is_favourite(dir);
                 v.push(Item::row(if fav { t("从收藏夹移除", "Remove from favourites") } else { t("添加到收藏夹", "Add to favourites") }, if fav { "star-off" } else { "star" }, "", Cmd::ToggleFavourite(dir.clone())));
             }
@@ -855,6 +859,10 @@ impl PaneView {
                 Item::Sep,
                 Item::row(t("在终端中打开", "Open in Terminal"), "terminal", "", Cmd::Terminal),
                 Item::row(t("复制文件夹路径", "Copy folder path"), "link", "", Cmd::CopyFolderPath),
+                {
+                    let has = grids_core::notes::get(&state::shared(cx).config.notes, &self.state.path).is_some();
+                    Item::row(if has { t("编辑此文件夹的备注", "Edit this folder's note") } else { t("为此文件夹添加备注", "Add a note to this folder") }, "sticky-note", "", Cmd::EditNote(self.state.path.clone()))
+                },
                 Item::row(t("属性", "Properties"), "info", "", Cmd::FolderProperties).enabled(cfg!(windows)),
                 Item::Sep,
                 more,
@@ -938,6 +946,7 @@ impl PaneView {
             Cmd::PasteInto(d) => self.paste_into(d, cx),
             Cmd::CopyPath => self.copy_paths(cx),
             Cmd::Shelve => self.shelve(cx),
+            Cmd::EditNote(p) => cx.emit(PaneEvent::EditNote(p)),
             Cmd::Rename => self.start_rename(window, cx),
             Cmd::Delete => self.ask_delete(false, cx),
             Cmd::Zip => if let Some(p) = first && !self.refuse_locked(std::slice::from_ref(&dir), cx) {
@@ -1072,6 +1081,18 @@ const FOLD_W: f32 = 18. + CHEVRON_W;
 fn crumb_width(label: &str, size: f32) -> f32 {
     let em: f32 = label.chars().map(|c| if (c as u32) >= 0x2E80 { 1.0 } else if c.is_ascii_uppercase() || "mwMW".contains(c) { 0.72 } else { 0.58 }).sum();
     em * size + 8. + 2.
+}
+
+/// The sticky-note mark beside a folder that has a note; hover shows it.
+fn note_mark(e: &Entry, r: usize, cx: &App) -> Option<AnyElement> {
+    if !e.is_dir { return None }
+    let notes = &state::shared(cx).config.notes;
+    if notes.is_empty() { return None }
+    let text = grids_core::notes::get(notes, &e.path)?;
+    Some(div().id(("note", r)).flex_none().ml(px(-4.)).size(px(18.)).flex().items_center().justify_center()
+        .child(icon("sticky-note", 13., Theme::star()))
+        .tip_label(crate::ui::wrap_tip(text, 56), crate::ui::TipSide::Below)
+        .into_any_element())
 }
 
 /// Where the filter text matches in `name` (case-insensitive), for highlighting.
@@ -1323,6 +1344,25 @@ impl PaneView {
             )
     }
 
+    /// One grey line under the title with the folder's note; click to edit.
+    fn render_note(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let notes = &state::shared(cx).config.notes;
+        if notes.is_empty() { return None }
+        let text = grids_core::notes::get(notes, &self.state.path)?;
+        let line: SharedString = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("  ").into();
+        let tip = format!("{}\n— {}", crate::ui::wrap_tip(text, 56), tr(cx, "点击编辑", "Click to edit"));
+        let path = self.state.path.clone();
+        Some(
+            div().id("pane-note").flex_none().h(px(24.)).mx(px(8.)).mb(px(2.)).px(px(6.)).rounded(px(6.)).flex().items_center().gap(px(6.)).cursor_pointer()
+                .text_size(px(12.)).text_color(Theme::text_caption())
+                .hover(|s| s.bg(Theme::fill_hover()))
+                .child(icon("sticky-note", 13., Theme::star()))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(line)))
+                .tip_label(tip, crate::ui::TipSide::Below)
+                .on_click(cx.listener(move |_, _, _, cx| { cx.stop_propagation(); cx.emit(PaneEvent::EditNote(path.clone())) })),
+        )
+    }
+
     fn render_filter(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (input, _) = self.filter.as_ref()?;
         Some(
@@ -1442,9 +1482,10 @@ impl PaneView {
                 .child(glyph)
                 .child(match renaming {
                     Some(rn) => rename_box(rn).flex_1().into_any_element(),
-                    None => div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(name_color)
+                    None => div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(name_color)
                         .child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary())).into_any_element(),
-                });
+                })
+                .children(note_mark(e, r, cx));
             let cell = div().id(("row", r)).flex_none().w(px(g.cell_w)).h(px(g.cell_h)).px(px(2.)).child(inner);
             return self.item_events(cell, r, e, selected, cx);
         }
@@ -1466,8 +1507,9 @@ impl PaneView {
                     .child(StyledText::new(e.name.clone()).with_highlights(hl)).into_any_element()
             }
         };
+        let mark = note_mark(e, r, cx).map(|m| div().absolute().top(px(2.)).right(px(-6.)).child(m));
         let inner = hl(div().size_full().rounded(px(8.)).pt(px(8.)).px(px(4.)).flex().flex_col().items_center().gap(px(6.)))
-            .child(div().flex_none().child(picture))
+            .child(div().flex_none().relative().child(picture).children(mark))
             .child(name);
         let cell = div().id(("row", r)).flex_none().w(px(g.cell_w)).h(px(g.cell_h)).p(px(2.)).child(inner);
         self.item_events(cell, r, e, selected, cx)
@@ -1488,7 +1530,8 @@ impl PaneView {
         };
         let name_cell = div().flex_none().w(px(widths[0])).h_full().pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)).child(glyph).map(|d| match renaming {
             Some(rn) => d.child(div().flex_1().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone())),
-            None => d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(if e.hidden { Theme::text_caption() } else { Theme::text() }).child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary()))),
+            None => d.child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(if e.hidden { Theme::text_caption() } else { Theme::text() }).child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary())))
+                .children(note_mark(e, r, cx)),
         });
         let cell = |w: f32, text: String, right: bool| div().flex_none().w(px(w)).px(px(CELL_PAD)).overflow_hidden().whitespace_nowrap().text_ellipsis().when(right, |d| d.flex().justify_end()).child(ui_text(text));
         let size = if e.is_dir { String::new() } else { format::size(e.size, lang) };
@@ -1686,6 +1729,7 @@ impl Render for PaneView {
                 cx.notify();
             }))
             .child(self.render_header(cx))
+            .children(self.render_note(cx))
             .children(self.render_filter(cx))
             .when(grid.is_none(), |d| d.child(self.render_columns(widths, cx)))
             .child(body)

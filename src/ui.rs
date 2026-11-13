@@ -203,6 +203,23 @@ impl TipExt for Stateful<Div> {
     }
 }
 
+/// Breaks `text` into tooltip lines about `units` wide (a CJK character
+/// counts 2, others 1); tooltips don't wrap on their own.
+pub fn wrap_tip(text: &str, units: usize) -> String {
+    let mut out = String::new();
+    for para in text.lines() {
+        if !out.is_empty() { out.push('\n') }
+        let mut w = 0;
+        for ch in para.chars() {
+            let cw = if (ch as u32) >= 0x2E80 { 2 } else { 1 };
+            if w + cw > units { out.push('\n'); w = 0 }
+            out.push(ch);
+            w += cw;
+        }
+    }
+    out
+}
+
 /// Full-width CJK punctuation (、。〈〉《》「」『』【】〔〕（）：，… in U+3001–301B / U+FF01–FF65).
 pub fn is_cjk_punct(ch: char) -> bool {
     matches!(ch, '\u{3001}'..='\u{3003}' | '\u{3008}'..='\u{3011}' | '\u{3014}'..='\u{301B}'
