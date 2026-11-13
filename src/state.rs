@@ -33,6 +33,14 @@ impl Shared {
 pub fn shared(cx: &App) -> &Shared { cx.global::<Shared>() }
 pub fn lang(cx: &App) -> Lang { cx.global::<Shared>().config.lang }
 pub fn en(cx: &App) -> bool { lang(cx) == Lang::En }
+/// The read-only folder covering `path` (itself or an ancestor), if any.
+pub fn locked_root(cx: &App, path: &Path) -> Option<PathBuf> {
+    grids_core::locked::locked_root(&shared(cx).config.locked, path).cloned()
+}
+/// The first read-only folder covering any of `paths`.
+pub fn locked_any(cx: &App, paths: &[PathBuf]) -> Option<PathBuf> {
+    paths.iter().find_map(|p| locked_root(cx, p))
+}
 /// The string for the interface language.
 pub fn tr(cx: &App, zh: &'static str, en: &'static str) -> &'static str { if self::en(cx) { en } else { zh } }
 

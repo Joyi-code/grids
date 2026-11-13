@@ -124,6 +124,8 @@ pub struct Workspace {
     layout_btn: Rc<Cell<Bounds<Pixels>>>,
     toast: Option<(String, u64)>,
     toast_seq: u64,
+    /// The read-only folder behind the current toast: it offers 解锁.
+    toast_unlock: Option<PathBuf>,
     save_task: Option<Task<()>>,
     session_input: Option<(Entity<TextInput>, Vec<Subscription>)>,
     drives: Vec<grids_shell::Drive>,
@@ -157,6 +159,7 @@ impl Workspace {
             layout_btn: Rc::default(),
             toast: None,
             toast_seq: 0,
+            toast_unlock: None,
             save_task: None,
             session_input: None,
             drives: grids_shell::drives(),
@@ -191,6 +194,12 @@ impl Workspace {
             }
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
             PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
+            PaneEvent::ToggleMaximize => {
+                if let Some(i) = this.panes.iter().position(|p| p == pane) { this.active = i }
+                this.toggle_maximize(window, cx)
+            }
+            PaneEvent::RestoreGrid => if this.maximized.is_some() { this.toggle_maximize(window, cx) },
+            PaneEvent::Locked(root) => this.show_locked(root.clone(), cx),
             PaneEvent::OpenInNext(path) => {
                 let n = this.panes.len();
                 let Some(i) = this.panes.iter().position(|p| p == pane) else { return };
@@ -222,9 +231,11 @@ impl Workspace {
         self.active = i.min(self.panes.len().saturating_sub(1));
         for (j, p) in self.panes.iter().enumerate() {
             let on = j == self.active;
-            p.update(cx, |p, cx| if p.active != on { p.active = on; cx.notify() });
+            // Focusing a pane clears its +N badge.
+            p.update(cx, |p, cx| if p.active != on || (on && p.unseen > 0) { p.active = on; if on { p.unseen = 0 } cx.notify() });
         }
         if self.maximized.is_some() { self.maximized = Some(self.active) }
+        self.sync_max(cx);
         self.schedule_save(cx);
         cx.notify();
     }
@@ -240,11 +251,28 @@ impl Workspace {
         self.toast_seq += 1;
         let seq = self.toast_seq;
         self.toast = Some((msg, seq));
+        self.toast_unlock = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = this.update(cx, |this, cx| if this.toast.as_ref().is_some_and(|t| t.1 == seq) { this.toast = None; cx.notify() });
         }).detach();
+    }
+
+    /// An edit was refused in a read-only folder: say so, offer to unlock.
+    fn show_locked(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let msg = tr(cx, "此文件夹已设为只读（仅在 Grids 内生效）", "This folder is read-only (inside Grids only)").to_string();
+        self.show_toast(msg, cx);
+        self.toast_unlock = Some(root);
+    }
+
+    fn unlock(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let locked = &mut cx.global_mut::<Shared>().config.locked;
+        locked.retain(|l| l != &root);
+        self.toast = None;
+        self.toast_unlock = None;
+        self.schedule_save(cx);
+        window.refresh();
     }
 
     // ---- sessions and saving
@@ -271,6 +299,7 @@ impl Workspace {
         let session = session.normalized(&home_dir());
         self.layout = session.layout.clone();
         self.maximized = None;
+        self.sync_max(cx);
         self.panes.clear();
         self._subs.retain(|_| false);
         self._subs.push(cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx)));
@@ -325,6 +354,7 @@ impl Workspace {
         self.panes.swap(i, j);
         for k in [i, j] { self.panes[k].update(cx, |p, cx| { p.index = k; cx.notify() }) }
         self.maximized = None;
+        self.sync_max(cx);
         self.set_active(j, window, cx);
         self.schedule_save(cx);
     }
@@ -354,6 +384,7 @@ impl Workspace {
         self.panes = panes;
         self.layout = new;
         self.maximized = None;
+        self.sync_max(cx);
         self.set_active(active, window, cx);
         self.schedule_save(cx);
     }
@@ -452,6 +483,15 @@ impl Workspace {
         c.sidebar_open = !c.sidebar_open;
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    /// Tells each pane whether it fills the grid (its title bar shows it).
+    fn sync_max(&mut self, cx: &mut Context<Self>) {
+        let n = self.panes.len();
+        for (j, p) in self.panes.iter().enumerate() {
+            let m = (self.maximized == Some(j)).then_some(n);
+            p.update(cx, |p, cx| if p.maximized != m { p.maximized = m; cx.notify() });
+        }
     }
 
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1053,7 +1093,7 @@ impl Workspace {
             .on_drag(SplitDrag { col, i }, |d, _, _, cx| cx.new(|_| d.clone()))
     }
 
-    fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_status(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = state::lang(cx);
         let en = lang == format::Lang::En;
         let mut left = String::new();
@@ -1070,6 +1110,9 @@ impl Workspace {
         }
         let pane_no = if en { format!("Pane {}", self.active + 1) } else { format!("窗格 {}", self.active + 1) };
         let sidebar_open = state::shared(cx).config.sidebar_open;
+        // The shortcut hint goes first when the bar gets narrow.
+        let bar_w = f32::from(window.viewport_size().width) - if sidebar_open { state::shared(cx).config.sidebar_width } else { 0. };
+        let hint = bar_w >= 820.;
         div()
             .h(px(STATUS_H))
             .flex_none()
@@ -1085,8 +1128,16 @@ impl Workspace {
             .when(!sidebar_open, |d| d.child(self.version_label(cx)))
             .child(div().flex_none().whitespace_nowrap().child(pane_no))
             .child(div().flex_none().whitespace_nowrap().child(left))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(Theme::text()).children(self.toast.as_ref().map(|t| ui_text(t.0.clone()))))
-            .child(div().flex_none().whitespace_nowrap().child("Ctrl+Tab / Ctrl+1…9"))
+            .child(div().flex_1().min_w_0().flex().items_center().gap(px(8.))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(Theme::text()).children(self.toast.as_ref().map(|t| ui_text(t.0.clone()))))
+                .children(self.toast_unlock.clone().map(|root| {
+                    div().id("toast-unlock").flex_none().h(px(22.)).px(px(8.)).rounded(px(6.)).flex().items_center().gap(px(4.)).cursor_pointer()
+                        .bg(Theme::fill_hover()).hover(|s| s.bg(Theme::fill_hover_strong())).text_color(Theme::text())
+                        .child(icon("lock-open", 12., Theme::icon()))
+                        .child(tr(cx, "解锁", "Unlock"))
+                        .on_click(cx.listener(move |this, _, window, cx| this.unlock(root.clone(), window, cx)))
+                })))
+            .when(hint, |d| d.child(div().flex_none().whitespace_nowrap().child("Ctrl+Tab / Ctrl+1…9")))
     }
 }
 
@@ -1158,7 +1209,7 @@ impl Render for Workspace {
                 div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body())
                     .child(self.render_topbar(window, cx))
                     .child(self.render_grid(cx))
-                    .child(self.render_status(cx)),
+                    .child(self.render_status(window, cx)),
             )
             .children(self.render_picker(cx))
             .children(self.render_version_pop(window, cx))

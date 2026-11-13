@@ -15,7 +15,7 @@ use grids_core::format;
 use grids_core::listing::{self, Entry};
 use grids_core::paths;
 use grids_core::session::{Columns, PaneSave, ViewMode};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use grids_core::{PaneState, SortKey};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -104,6 +104,10 @@ const ICON: f32 = 18.;
 const ROW_X: f32 = 8.;
 const CELL_PAD: f32 = 8.;
 const NAME_MIN: f32 = 120.;
+/// How long a changed entry stays highlighted.
+const FRESH: Duration = Duration::from_secs(4);
+/// More changes than this at once are only counted, not highlighted.
+const FRESH_MAX: usize = 500;
 
 /// What the workspace hears from a pane.
 pub enum PaneEvent {
@@ -120,6 +124,12 @@ pub enum PaneEvent {
     /// Delete these (to the recycle bin unless `permanent`) once the user
     /// confirms in the workspace's dialog.
     AskDelete { paths: Vec<PathBuf>, permanent: bool },
+    /// Double-click on the title bar: maximize this pane or restore the grid.
+    ToggleMaximize,
+    /// Esc with nothing else to close while maximized.
+    RestoreGrid,
+    /// An edit was refused in a read-only folder (the locked root).
+    Locked(PathBuf),
 }
 
 /// Files dragged from a pane.
@@ -198,6 +208,19 @@ pub struct PaneView {
     type_buf: (String, Instant),
     /// Names to select once the next reload is in (pasted, dropped files).
     pending_select: Option<Vec<String>>,
+    /// Entries changed by a live reload, with when they were seen; drawn
+    /// with an accent wash fading out over `FRESH`.
+    fresh: HashMap<String, Instant>,
+    /// Changes counted while the pane was not the active one (+N badge).
+    pub unseen: usize,
+    /// The last listing and its folder, to diff the next live reload against.
+    prev: Vec<Entry>,
+    listed: Option<PathBuf>,
+    /// `Some(n)`: this pane fills the grid of `n` panes.
+    pub maximized: Option<usize>,
+    /// A first click on the breadcrumbs waits briefly for a second one
+    /// (double-click maximizes) before opening the address field.
+    addr_click: Option<Task<()>>,
 }
 
 impl EventEmitter<PaneEvent> for PaneView {}
@@ -237,6 +260,12 @@ impl PaneView {
             _watch_task: None,
             type_buf: (String::new(), Instant::now()),
             pending_select: None,
+            fresh: HashMap::new(),
+            unseen: 0,
+            prev: Vec::new(),
+            listed: None,
+            maximized: None,
+            addr_click: None,
         };
         me.load(None, cx);
         me
@@ -250,7 +279,11 @@ impl PaneView {
 
     /// Reads the folder again on a background thread; `select` picks an
     /// entry by name once it is in.
-    pub fn load(&mut self, select: Option<String>, cx: &mut Context<Self>) {
+    pub fn load(&mut self, select: Option<String>, cx: &mut Context<Self>) { self.load_with(select, false, cx) }
+
+    /// `live`: a reload for changes on disk, whose new and modified entries
+    /// are highlighted (never on entering a folder or a manual refresh).
+    fn load_with(&mut self, select: Option<String>, live: bool, cx: &mut Context<Self>) {
         self.load_seq += 1;
         let seq = self.load_seq;
         let path = self.state.path.clone();
@@ -265,6 +298,7 @@ impl PaneView {
                 this.loading = false;
                 match res {
                     Ok(entries) => {
+                        this.note_changes(&path, live, &entries);
                         this.state.set_entries(entries, select.as_deref());
                         let mut jump = select.is_some();
                         if let Some(names) = this.pending_select.take() { this.state.select_names(&names); jump = true }
@@ -276,6 +310,33 @@ impl PaneView {
             });
         }));
         cx.notify();
+    }
+
+    /// Diffs a fresh listing of `path` against the previous one: changed
+    /// names start fading highlights (up to `FRESH_MAX` of them; more, as
+    /// when unpacking an archive, only count) and, while the pane is not
+    /// active, add to its +N badge.
+    fn note_changes(&mut self, path: &Path, live: bool, entries: &[Entry]) {
+        let same = self.listed.as_deref() == Some(path);
+        if !same { self.fresh.clear() }
+        if live && same {
+            let ch = grids_core::diff::diff_entries(&self.prev, entries);
+            if !ch.is_empty() {
+                if !self.active { self.unseen += ch.len() }
+                if ch.len() <= FRESH_MAX {
+                    let now = Instant::now();
+                    for n in ch.added.into_iter().chain(ch.modified) { self.fresh.insert(n, now); }
+                }
+            }
+        }
+        self.prev = entries.to_vec();
+        self.listed = Some(path.to_path_buf());
+    }
+
+    /// The accent wash over a changed entry: 18 % fading to 0 over `FRESH`.
+    fn fresh_wash(&self, name: &str) -> Option<Hsla> {
+        let t = self.fresh.get(name)?.elapsed().as_secs_f32() / FRESH.as_secs_f32();
+        (t < 1.).then(|| Theme::primary().alpha(0.18 * (1. - t)))
     }
 
     /// Watches the current folder; changes reload it after a short pause.
@@ -294,7 +355,7 @@ impl PaneView {
             while rx.next().await.is_some() {
                 cx.background_executor().timer(Duration::from_millis(250)).await;
                 while rx.try_recv().is_ok() {}
-                if this.update(cx, |this, cx| this.load(None, cx)).is_err() { break }
+                if this.update(cx, |this, cx| this.load_with(None, true, cx)).is_err() { break }
             }
         }));
     }
@@ -520,8 +581,20 @@ impl PaneView {
 
     // ---- rename and new folder
 
+    /// Refuses an edit touching a read-only folder: true when `paths` are
+    /// in one (the workspace shows why, with an unlock button).
+    fn refuse_locked(&self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
+        let Some(root) = state::locked_any(cx, paths) else { return false };
+        cx.emit(PaneEvent::Locked(root));
+        true
+    }
+
+    /// This pane's folder is read-only.
+    fn here_locked(&self, cx: &App) -> bool { state::locked_root(cx, &self.state.path).is_some() }
+
     fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(e) = self.state.cursor_entry().cloned().or_else(|| self.state.selection().first().map(|e| (*e).clone())) else { return };
+        if self.refuse_locked(std::slice::from_ref(&e.path), cx) { return }
         self.state.select_name(&e.name);
         if let Some(r) = self.state.cursor { self.reveal(r, ScrollStrategy::Top) }
         let input = cx.new(|cx| {
@@ -563,6 +636,7 @@ impl PaneView {
     }
 
     fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_locked(std::slice::from_ref(&self.state.path), cx) { return }
         let base = tr(cx, "新建文件夹", "New folder");
         let name = paths::unique_name(&self.state.path, base);
         match std::fs::create_dir(self.state.path.join(&name)) {
@@ -581,7 +655,7 @@ impl PaneView {
 
     fn copy_files(&mut self, cut: bool, cx: &mut Context<Self>) {
         let t = self.state.targets();
-        if t.is_empty() { return }
+        if t.is_empty() || (cut && self.refuse_locked(&t, cx)) { return }
         let n = t.len();
         state::set_clipboard(t, cut, cx);
         let msg = if state::en(cx) { format!("{} {n} item(s)", if cut { "Cut" } else { "Copied" }) } else { format!("已{} {n} 项", if cut { "剪切" } else { "复制" }) };
@@ -594,6 +668,7 @@ impl PaneView {
     }
 
     fn paste_into(&mut self, dest: PathBuf, cx: &mut Context<Self>) {
+        if self.refuse_locked(std::slice::from_ref(&dest), cx) { return }
         let Some((paths, cut)) = state::get_clipboard(cx) else { return };
         let names: Vec<String> = paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         if cut { cx.global_mut::<state::Shared>().clipboard = None }
@@ -606,7 +681,8 @@ impl PaneView {
     /// the system's), then calls `delete_confirmed`.
     fn ask_delete(&mut self, permanent: bool, cx: &mut Context<Self>) {
         let paths = self.state.targets();
-        if paths.is_empty() { return }
+        // A read-only folder gets the notice, never the dialog.
+        if paths.is_empty() || self.refuse_locked(&paths, cx) { return }
         cx.emit(PaneEvent::AskDelete { paths, permanent })
     }
 
@@ -617,6 +693,9 @@ impl PaneView {
 
     fn run_op(&mut self, op: Op, paths: Vec<PathBuf>, dest: Option<PathBuf>, select: Vec<String>, cx: &mut Context<Self>) {
         if paths.is_empty() { return }
+        // Last line of defence for every route here (keys, menus, drops).
+        if !matches!(op, Op::Copy) && self.refuse_locked(&paths, cx) { return }
+        if let Some(d) = &dest && self.refuse_locked(std::slice::from_ref(d), cx) { return }
         let mut dirs: Vec<PathBuf> = paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
         if let Some(d) = &dest { dirs.push(d.clone()) }
         dirs.sort();
@@ -646,14 +725,15 @@ impl PaneView {
     /// Reloads when showing one of `dirs` (selecting freshly pasted names).
     pub fn refresh_if_showing(&mut self, dirs: &[PathBuf], cx: &mut Context<Self>) {
         if dirs.iter().any(|d| d == &self.state.path) {
-            self.load(None, cx);
+            self.load_with(None, true, cx);
         }
     }
 
     fn drop_files(&mut self, d: &DraggedFiles, into: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let dest = into.unwrap_or_else(|| self.state.path.clone());
         if d.from == dest || d.paths.iter().any(|p| p == &dest || dest.starts_with(p)) { return }
-        let copy = window.modifiers().control || !d.paths.first().is_some_and(|p| grids_shell::same_volume(p, &dest));
+        // Out of a read-only folder a drag only copies.
+        let copy = window.modifiers().control || state::locked_any(cx, &d.paths).is_some() || !d.paths.first().is_some_and(|p| grids_shell::same_volume(p, &dest));
         let names = d.paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         window.focus(&self.focus);
         self.run_op(if copy { Op::Copy } else { Op::Move }, d.paths.clone(), Some(dest), names, cx);
@@ -674,7 +754,9 @@ impl PaneView {
         if row.is_none() { self.state.clear_selection() }
         let en = state::en(cx);
         let t = move |zh: &'static str, e: &'static str| -> SharedString { (if en { e } else { zh }).into() };
-        let can_paste = state::get_clipboard(cx).is_some();
+        // Read-only: no edits, and no system menu (it would get round that).
+        let ro = self.here_locked(cx);
+        let can_paste = state::get_clipboard(cx).is_some() && !ro;
         let more = Item::row(t("显示更多选项", "Show more options"), "ellipsis", "", Cmd::More).enabled(cfg!(windows));
         let open_with_label = t("打开方式", "Open with");
         let mut open_with_for = None;
@@ -690,22 +772,21 @@ impl PaneView {
             }
             if folder.is_some() { v.push(Item::row(t("在下一格中打开", "Open in next pane"), "square-split-horizontal", "", Cmd::OpenInNextPane)) }
             v.push(Item::Sep);
-            v.push(Item::row(t("剪切", "Cut"), "scissors", "Ctrl+X", Cmd::Cut));
+            v.push(Item::row(t("剪切", "Cut"), "scissors", "Ctrl+X", Cmd::Cut).enabled(!ro));
             v.push(Item::row(t("复制", "Copy"), "copy", "Ctrl+C", Cmd::Copy));
             if let Some(dir) = &folder { v.push(Item::row(t("粘贴到此文件夹", "Paste into folder"), "clipboard-paste", "", Cmd::PasteInto(dir.clone())).enabled(can_paste)) }
             v.push(Item::row(t("复制路径", "Copy as path"), "link", "Ctrl+Shift+C", Cmd::CopyPath));
-            v.push(Item::row(t("重命名", "Rename"), "pencil", "F2", Cmd::Rename).enabled(one));
-            v.push(Item::row(t("删除", "Delete"), "trash-2", "Delete", Cmd::Delete));
+            v.push(Item::row(t("重命名", "Rename"), "pencil", "F2", Cmd::Rename).enabled(one && !ro));
+            v.push(Item::row(t("删除", "Delete"), "trash-2", "Delete", Cmd::Delete).enabled(!ro));
             v.push(Item::Sep);
-            v.push(Item::row(t("压缩为 ZIP 文件", "Compress to ZIP file"), "file-archive", "", Cmd::Zip));
+            v.push(Item::row(t("压缩为 ZIP 文件", "Compress to ZIP file"), "file-archive", "", Cmd::Zip).enabled(!ro));
             if let Some(dir) = &folder {
                 let fav = state::shared(cx).config.is_favourite(dir);
                 v.push(Item::row(if fav { t("从收藏夹移除", "Remove from favourites") } else { t("添加到收藏夹", "Add to favourites") }, if fav { "star-off" } else { "star" }, "", Cmd::ToggleFavourite(dir.clone())));
             }
             v.push(Item::row(t("在资源管理器中显示", "Show in Explorer"), "folder-search", "", Cmd::Reveal));
             v.push(Item::row(t("属性", "Properties"), "info", "Alt+Enter", Cmd::Properties).enabled(cfg!(windows)));
-            v.push(Item::Sep);
-            v.push(more);
+            if !ro { v.push(Item::Sep); v.push(more) }
             v
         } else {
             let st = &self.state;
@@ -735,7 +816,7 @@ impl PaneView {
                 Item::row(t("刷新", "Refresh"), "refresh-cw", "F5", Cmd::Refresh),
                 Item::Sep,
                 Item::row(t("粘贴", "Paste"), "clipboard-paste", "Ctrl+V", Cmd::Paste).enabled(can_paste),
-                Item::sub(t("新建", "New"), "plus", new_items),
+                Item::sub(t("新建", "New"), "plus", if ro { vec![Item::Note(t("只读文件夹", "Read-only folder"))] } else { new_items }),
                 Item::Sep,
                 Item::row(t("在终端中打开", "Open in Terminal"), "terminal", "", Cmd::Terminal),
                 Item::row(t("复制文件夹路径", "Copy folder path"), "link", "", Cmd::CopyFolderPath),
@@ -744,6 +825,7 @@ impl PaneView {
                 more,
             ]
         };
+        let items = if ro && row.is_none() { let mut v = items; v.truncate(v.len() - 2); v } else { items };
         let menu = cx.new(|cx| MenuView::new(items, pos, 264., cx));
         let sub = cx.subscribe_in(&menu, window, move |this, _, ev: &MenuEvent, window, cx| {
             let pos = pos;
@@ -822,7 +904,7 @@ impl PaneView {
             Cmd::CopyPath => self.copy_paths(cx),
             Cmd::Rename => self.start_rename(window, cx),
             Cmd::Delete => self.ask_delete(false, cx),
-            Cmd::Zip => if let Some(p) = first {
+            Cmd::Zip => if let Some(p) = first && !self.refuse_locked(std::slice::from_ref(&dir), cx) {
                 let stem = if targets.len() == 1 { p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default() } else { dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "archive".into()) };
                 let name = paths::unique_name(&dir, &format!("{stem}.zip"));
                 let dest = dir.join(&name);
@@ -851,6 +933,7 @@ impl PaneView {
             Cmd::Refresh => self.load(None, cx),
             Cmd::View(v) => self.set_view(v, cx),
             Cmd::NewFolder => self.new_folder(window, cx),
+            Cmd::NewFile(_) if self.refuse_locked(std::slice::from_ref(&dir), cx) => {}
             Cmd::NewFile(ext) => match grids_shell::create_new(&dir, &ext) {
                 Ok(p) => {
                     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1059,14 +1142,25 @@ impl PaneView {
                         .map(|d| if last { d.text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()) } else { d.text_size(px(13.)).text_color(Theme::text_caption()) })
                         .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
                         .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.navigate(path.clone(), cx) })),
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if ev.click_count() < 2 { this.navigate(path.clone(), cx) } })),
                 );
                 if !last { row = row.child(div().mx(px(1.)).flex_none().child(icon("chevron-right", 12., Theme::icon_muted()))) }
             }
             // Long paths keep their end (the folder) in view.
             div().id("crumbs").flex_1().min_w_0().h(px(FIELD_H)).flex().items_center().justify_end().overflow_hidden().cursor_text()
                 .child(row).child(div().flex_1().min_w(px(12.)))
-                .on_click(cx.listener(|this, _, window, cx| this.edit_address(window, cx)))
+                .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    if ev.click_count() >= 2 {
+                        this.addr_click = None;
+                        return cx.emit(PaneEvent::ToggleMaximize);
+                    }
+                    // Wait out a possible second click before editing.
+                    this.addr_click = Some(cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_millis(260)).await;
+                        let _ = this.update_in(cx, |this, window, cx| { if this.addr_click.take().is_some() { this.edit_address(window, cx) } });
+                    }));
+                }))
                 .into_any_element()
         };
         let quiet = !self.active;
@@ -1075,7 +1169,42 @@ impl PaneView {
                 .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))
                 .child(icon(glyph, 16., if enabled { Theme::icon() } else { Theme::text_disabled() }))
         };
+        // Changes while another pane had the focus.
+        let unseen = (self.unseen > 0).then(|| {
+            div().id("unseen").flex_none().h(px(18.)).px(px(6.)).rounded(px(9.)).flex().items_center()
+                .bg(Theme::primary().alpha(0.14)).text_color(Theme::primary())
+                .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD)
+                .child(format!("+{}", self.unseen.min(9999)))
+                .tip(t("失焦期间的变化", "Changes while away"), None)
+        });
+        let max_tag = self.maximized.map(|n| {
+            div().flex_none().h(px(20.)).px(px(7.)).rounded(px(6.)).flex().items_center().gap(px(4.))
+                .bg(Theme::fill_hover()).text_size(px(11.)).text_color(Theme::text_caption()).whitespace_nowrap()
+                .child(icon("maximize-2", 11., Theme::icon_muted()))
+                .child(if en { format!("Pane {} of {n}", self.index + 1) } else { format!("第 {} 格 / 共 {n} 格", self.index + 1) })
+        });
+        // Read-only: the lock stays in view; unlocked it shows on hover.
+        let lock_root = state::locked_root(cx, &st.path);
+        let lock_tip: SharedString = match &lock_root {
+            Some(r) if r == &st.path => t("只读文件夹（仅在 Grids 内生效）· 点击解锁", "Read-only (inside Grids only) · click to unlock").into(),
+            Some(r) => if en { format!("Read-only: locked at “{}” · click to unlock", r.display()) } else { format!("只读：由「{}」锁定 · 点击解锁", r.display()) }.into(),
+            None => t("设为只读（仅在 Grids 内生效）", "Make read-only (inside Grids only)").into(),
+        };
+        let locked = lock_root.is_some();
+        let lock_btn = div().id("lock").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
+            .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
+            .child(if locked { icon("lock", 15., Theme::primary()) } else { icon("lock-open", 15., Theme::icon()) })
+            .tip(&lock_tip, None)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let folder = state::locked_root(cx, &this.state.path).unwrap_or_else(|| this.state.path.clone());
+                grids_core::locked::toggle(&mut cx.global_mut::<state::Shared>().config.locked, &folder);
+                cx.emit(PaneEvent::Changed);
+                // Other panes may show folders under it.
+                window.refresh();
+            }));
+        let (lock_out, lock_in) = if locked { (Some(lock_btn), None) } else { (None, Some(lock_btn)) };
         div()
+            .id("pane-head")
             .h(px(HEAD_H))
             .flex_none()
             .flex()
@@ -1083,11 +1212,17 @@ impl PaneView {
             .gap(px(6.))
             .pl(px(12.))
             .pr(px(8.))
+            .on_click(cx.listener(|_, ev: &ClickEvent, _, cx| if ev.click_count() == 2 { cx.emit(PaneEvent::ToggleMaximize) }))
             .child(badge)
+            .children(max_tag)
+            .children(unseen)
             .child(path_area)
+            .children(lock_out)
             .child(
                 div().flex().flex_none().items_center().gap(px(1.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .when(quiet, |d| d.opacity(0.).group_hover("pane", |s| s.opacity(1.)))
+                    .children(lock_in)
                     .child(btn("back", "arrow-left", st.can_back()).tip(t("后退", "Back"), Some("Alt+←")).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
                     .child(btn("fwd", "arrow-right", st.can_forward()).tip(t("前进", "Forward"), Some("Alt+→")).on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))))
                     .child(btn("up", "arrow-up", st.can_up()).tip(t("上一级", "Up"), Some("Alt+↑")).on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
@@ -1213,8 +1348,10 @@ impl PaneView {
         let kind = e.kind();
         let renaming = self.rename.as_ref().filter(|rn| rn.path == e.path);
         let name_color = if e.hidden { Theme::text_caption() } else { Theme::text() };
+        let wash = self.fresh_wash(&e.name).filter(|_| !selected);
         let hl = |d: Div| -> Div {
             d.map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
+                .when_some(wash, |d, c| d.bg(c))
                 .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
         };
         let rename_box = |rn: &RenameState| div().w_full().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone());
@@ -1278,6 +1415,7 @@ impl PaneView {
         });
         let cell = |w: f32, text: String, right: bool| div().flex_none().w(px(w)).px(px(CELL_PAD)).overflow_hidden().whitespace_nowrap().text_ellipsis().when(right, |d| d.flex().justify_end()).child(ui_text(text));
         let size = if e.is_dir { String::new() } else { format::size(e.size, lang) };
+        let wash = self.fresh_wash(&e.name);
         let row = div()
             .id(("row", r))
             .h(px(ROW_H))
@@ -1287,6 +1425,7 @@ impl PaneView {
             .items_center()
             .text_color(Theme::text_caption())
             .map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
+            .when_some(wash.filter(|_| !selected), |d, c| d.bg(c))
             .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
             .child(name_cell)
             .when(widths[1] > 0., |d| d.child(cell(widths[1], short_date(format::date(e.modified, offset), widths[1]), false)))
@@ -1322,6 +1461,11 @@ impl Render for PaneView {
         let avail = f32::from(self.list_bounds.get().size.width);
         let avail = if avail <= 1. { 600. } else { avail };
         let widths = self.fit_columns(avail);
+        // Fading highlights draw frame by frame, only while there are any.
+        if !self.fresh.is_empty() {
+            self.fresh.retain(|_, t| t.elapsed() < FRESH);
+            if !self.fresh.is_empty() { window.request_animation_frame() }
+        }
         let n = self.state.len();
         let en = state::en(cx);
         let grid = grid_metrics(self.view, avail);
@@ -1356,7 +1500,13 @@ impl Render for PaneView {
             .flex_1()
             .min_h_0()
             .pt(px(2.))
-            .child(canvas(move |b, _, _| list_bounds.set(b), |_, _, _, _| {}).absolute().size_full())
+            // Columns are fitted to last frame's width: when it changes (the
+            // pane was resized), lay out again or the header and rows stay
+            // fitted to the old width, cut at the pane's edge.
+            .child(canvas(move |b, window, _| {
+                let old = list_bounds.replace(b);
+                if (old.size.width - b.size.width).abs() > px(0.5) { window.request_animation_frame() }
+            }, |_, _, _, _| {}).absolute().size_full())
             .child(self.ctrl_wheel(cx))
             .child(list)
             .when_some(empty_msg, |d, msg| d.child(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(msg)))
@@ -1430,6 +1580,7 @@ impl Render for PaneView {
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 if this.menu.take().is_some() { return cx.notify() }
                 if this.filter.is_some() { return this.end_filter(window, cx) }
+                if this.maximized.is_some() { return cx.emit(PaneEvent::RestoreGrid) }
                 this.state.clear_selection();
                 cx.notify();
             }))
