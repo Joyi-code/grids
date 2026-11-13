@@ -461,6 +461,36 @@ pub fn open_terminal(dir: &Path) -> io::Result<()> {
     Err(last)
 }
 
+// ---------- thumbnails ----------
+
+/// Files larger than this are not decoded for a thumbnail.
+const THUMB_MAX_FILE: u64 = 64 * 1024 * 1024;
+
+pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
+    let size = size.clamp(16, 1024);
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "jpe" | "gif" | "webp" | "bmp"
+    ) {
+        return None;
+    }
+    if std::fs::metadata(path).ok()?.len() > THUMB_MAX_FILE {
+        return None;
+    }
+    let mut reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(512 * 1024 * 1024);
+    limits.max_image_width = Some(20_000);
+    limits.max_image_height = Some(20_000);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    Some(img.thumbnail(size, size).to_rgba8())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +610,39 @@ mod tests {
             assert!(info.contains("Path=/") && info.contains("DeletionDate="));
         }
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod thumb_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_common_images() {
+        let d = std::env::temp_dir().join(format!("grids_thumb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let img = RgbaImage::from_fn(400, 200, |x, _| image::Rgba([(x % 256) as u8, 0, 0, 255]));
+        for ext in ["png", "jpg", "bmp", "gif", "webp"] {
+            let p = d.join(format!("a.{ext}"));
+            let saved = if ext == "jpg" {
+                image::DynamicImage::ImageRgba8(img.clone())
+                    .to_rgb8()
+                    .save(&p)
+            } else {
+                img.save(&p)
+            };
+            if saved.is_err() {
+                continue; // no encoder for this format: decoding is what matters
+            }
+            let t = thumbnail(&p, 100).unwrap_or_else(|| panic!("{ext}"));
+            assert_eq!(t.dimensions(), (100, 50), "{ext}");
+        }
+        std::fs::write(d.join("a.txt"), "x").unwrap();
+        assert!(thumbnail(&d.join("a.txt"), 100).is_none());
+        std::fs::write(d.join("bad.png"), "not a png").unwrap();
+        assert!(thumbnail(&d.join("bad.png"), 100).is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

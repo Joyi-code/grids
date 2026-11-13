@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
     ERROR_CANCELLED, ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE,
-    HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, WPARAM,
+    HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -66,6 +66,9 @@ use windows::Win32::UI::Shell::{
     SHLoadIndirectString, SHMultiFileProperties, SHOP_FILEPATH, SHObjectProperties,
     SHOpenFolderAndSelectItems, SHOpenWithDialog, SHParseDisplayName, SLGP_RAWPATH,
     ShellExecuteExW, ShellLink,
+};
+use windows::Win32::UI::Shell::{
+    IShellItemImageFactory, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_THUMBNAILONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
@@ -1547,6 +1550,118 @@ pub fn open_terminal(dir: &Path) -> io::Result<()> {
     }
 }
 
+// ---------- thumbnails ----------
+
+type ThumbJob = (PathBuf, u32, std::sync::mpsc::Sender<Option<RgbaImage>>);
+
+/// How long a caller waits for one thumbnail (an offline share or a codec
+/// chewing on a huge video must not hold the app's worker forever).
+const THUMB_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+const THUMB_WORKERS: usize = 4;
+
+/// A few STA threads that own all IShellItemImageFactory calls. A call stuck
+/// in a thumbnail handler only ties up its worker; the caller gives up after
+/// THUMB_WAIT.
+fn thumb_queue() -> Option<&'static Mutex<std::sync::mpsc::Sender<ThumbJob>>> {
+    static QUEUE: OnceLock<Option<Mutex<std::sync::mpsc::Sender<ThumbJob>>>> = OnceLock::new();
+    QUEUE
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<ThumbJob>();
+            let rx = Arc::new(Mutex::new(rx));
+            let mut started = 0;
+            for i in 0..THUMB_WORKERS {
+                let rx = rx.clone();
+                let ok = std::thread::Builder::new()
+                    .name(format!("grids-thumb-{i}"))
+                    .spawn(move || {
+                        ensure_com();
+                        loop {
+                            let job = match rx.lock() {
+                                Ok(r) => r.recv(),
+                                Err(_) => return,
+                            };
+                            let Ok((path, size, reply)) = job else { return };
+                            // the caller may have given up already: nothing to do then
+                            let _ = reply.send(thumbnail_now(&path, size));
+                        }
+                    })
+                    .is_ok();
+                started += usize::from(ok);
+            }
+            (started > 0).then(|| Mutex::new(tx))
+        })
+        .as_ref()
+}
+
+pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
+    let size = size.clamp(16, 1024);
+    let (reply, answer) = std::sync::mpsc::channel();
+    thumb_queue()?
+        .lock()
+        .ok()?
+        .send((path.to_path_buf(), size, reply))
+        .ok()?;
+    answer.recv_timeout(THUMB_WAIT).ok().flatten()
+}
+
+fn thumbnail_now(path: &Path, size: u32) -> Option<RgbaImage> {
+    ensure_com();
+    let factory: IShellItemImageFactory =
+        unsafe { SHCreateItemFromParsingName(&wide(path), None) }.ok()?;
+    let want = SIZE {
+        cx: size as i32,
+        cy: size as i32,
+    };
+    // a real preview when a thumbnail handler has one, else the type's icon at this size
+    let bmp = unsafe { factory.GetImage(want, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK) }
+        .or_else(|_| unsafe { factory.GetImage(want, SIIGBF_ICONONLY) })
+        .ok()?;
+    let img = unsafe { hbitmap_to_rgba(bmp) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(bmp.0)) };
+    let img = img?;
+    Some(crate::fit_within(img, size))
+}
+
+/// A 32-bit shell bitmap as straight-alpha RGBA, top row first. Shell
+/// thumbnails are premultiplied (PARGB) when they carry alpha; photos often
+/// come with alpha 0 everywhere, which means opaque.
+unsafe fn hbitmap_to_rgba(bmp: HBITMAP) -> Option<RgbaImage> {
+    let mut bm = BITMAP::default();
+    if unsafe {
+        GetObjectW(
+            HGDIOBJ(bmp.0),
+            size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut _ as _),
+        )
+    } == 0
+    {
+        return None;
+    }
+    let (w, h) = (bm.bmWidth, bm.bmHeight.abs());
+    if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+    let dc = unsafe { CreateCompatibleDC(None) };
+    // negative height in bitmap_bgra: rows come back top-down whatever the source order
+    let px = unsafe { bitmap_bgra(dc, bmp, w, h) };
+    let _ = unsafe { DeleteDC(dc) };
+    let mut px = px?;
+    let chunks = px.as_chunks_mut::<4>().0;
+    let no_alpha = chunks.iter().all(|p| p[3] == 0);
+    for p in chunks.iter_mut() {
+        p.swap(0, 2); // BGRA -> RGBA
+        if no_alpha {
+            p[3] = 255;
+        } else if p[3] != 0 && p[3] != 255 {
+            let a = u32::from(p[3]);
+            for c in p.iter_mut().take(3) {
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    RgbaImage::from_raw(w as u32, h as u32, px)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1831,6 +1946,93 @@ mod tests {
             "你好"
         );
         assert_eq!(std::fs::read(out.join("报告 1.txt")).unwrap().len(), 10_000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn thumbnails() {
+        let d = std::env::temp_dir().join(format!("grids_win_thumb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // 400x200 gradient, written as PNG; the JPEG is made by Windows itself (WIC via PowerShell)
+        let img = RgbaImage::from_fn(400, 200, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+        });
+        let png = d.join("图 片 1.png");
+        img.save(&png).unwrap();
+        let jpg = d.join("photo.jpg");
+        let st = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Drawing; \
+                 $i = [System.Drawing.Image]::FromFile($env:SRC); \
+                 $i.Save($env:DST, [System.Drawing.Imaging.ImageFormat]::Jpeg); $i.Dispose()",
+            ])
+            .env("SRC", &png)
+            .env("DST", &jpg)
+            .status()
+            .unwrap();
+        assert!(st.success() && jpg.is_file());
+        let txt = d.join("a.txt");
+        std::fs::write(&txt, "x").unwrap();
+
+        for p in [&png, &jpg] {
+            let t = thumbnail(p, 128).unwrap_or_else(|| panic!("no thumbnail for {p:?}"));
+            println!("{}: {}x{}", p.display(), t.width(), t.height());
+            assert_eq!(t.width().max(t.height()), 128, "{:?}", t.dimensions());
+            assert!(t.width() > t.height(), "aspect lost: {:?}", t.dimensions());
+            assert!(t.pixels().any(|p| p[3] > 0), "fully transparent");
+            // the gradient survives: not a generic icon
+            let (l, r) = (
+                t.get_pixel(2, t.height() / 2),
+                t.get_pixel(60, t.height() / 2),
+            );
+            assert!(r[0] > l[0], "no gradient: {l:?} {r:?}");
+        }
+        // the 256 step must be the jumbo icon, not a 32 px one blown up: count distinct 2x2 blocks
+        let big = thumbnail(&txt, 256).expect("jumbo icon for .txt");
+        let mut blocky = 0usize;
+        let mut total = 0usize;
+        for y in (0..big.height().saturating_sub(1)).step_by(2) {
+            for x in (0..big.width().saturating_sub(1)).step_by(2) {
+                let q = [
+                    big.get_pixel(x, y),
+                    big.get_pixel(x + 1, y),
+                    big.get_pixel(x, y + 1),
+                    big.get_pixel(x + 1, y + 1),
+                ];
+                if q[0][3] > 0 {
+                    total += 1;
+                    blocky += usize::from(q.iter().all(|p| p == &q[0]));
+                }
+            }
+        }
+        println!(
+            "txt 256: {}x{}, {blocky}/{total} flat 2x2 blocks",
+            big.width(),
+            big.height()
+        );
+        assert_eq!(big.width().max(big.height()), 256);
+        let t = thumbnail(&txt, 64).expect("icon fallback for .txt");
+        println!("txt: {}x{}", t.width(), t.height());
+        assert!(t.width() <= 64 && t.height() <= 64 && t.width() >= 16);
+        assert!(t.pixels().any(|p| p[3] > 0));
+        assert!(thumbnail(&d.join("missing.png"), 64).is_none());
+
+        // many at once from several threads: no panic, all answered
+        let workers: Vec<_> = (0..8)
+            .map(|k| {
+                let (png, txt) = (png.clone(), txt.clone());
+                std::thread::spawn(move || {
+                    let p = if k % 2 == 0 { png } else { txt };
+                    thumbnail(&p, [32, 96, 256, 48][k % 4]).is_some()
+                })
+            })
+            .collect();
+        for w in workers {
+            assert!(w.join().expect("thumbnail panicked"));
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

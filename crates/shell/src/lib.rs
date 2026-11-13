@@ -344,6 +344,18 @@ pub fn compress_zip(paths: &[PathBuf], dest_zip: &Path) -> io::Result<()> {
     result
 }
 
+/// A preview of `path` whose longer side is `size_px` (aspect kept, never
+/// cropped). Windows: the shell's thumbnail (IShellItemImageFactory, the same
+/// previews Explorer shows, for images, videos, PDFs, Office files ...), else
+/// the type's icon at that size, so it is `Some` for almost any existing
+/// file. Elsewhere: png / jpeg / gif / webp / bmp decoded here, `None` for
+/// other files. Blocks: call from a background thread. Gives up after about
+/// 8 seconds (an offline share, a slow codec) and returns `None`. Not cached:
+/// cache in the app by path + modified time + size. Never shows UI.
+pub fn thumbnail(path: &Path, size_px: u32) -> Option<RgbaImage> {
+    imp::thumbnail(path, size_px)
+}
+
 /// Drives / volume roots. `/` plus removable mounts on Linux.
 pub fn drives() -> Vec<Drive> {
     imp::drives()
@@ -420,6 +432,27 @@ pub fn check_name(name: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Scales `img` down so its longer side is at most `size` (never up).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fit_within(img: RgbaImage, size: u32) -> RgbaImage {
+    let (w, h) = img.dimensions();
+    if w <= size && h <= size {
+        return img;
+    }
+    let (nw, nh) = if w >= h {
+        (
+            size,
+            ((u64::from(h) * u64::from(size) + u64::from(w) / 2) / u64::from(w)).max(1) as u32,
+        )
+    } else {
+        (
+            ((u64::from(w) * u64::from(size) + u64::from(h) / 2) / u64::from(h)).max(1) as u32,
+            size,
+        )
+    };
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
 }
 
 /// Creates `dir/<base><ext>`, or "<base> (2)<ext>", "(3)", ... when taken,
