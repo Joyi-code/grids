@@ -774,6 +774,21 @@ fn fs_path(item: &IShellItem) -> Option<PathBuf> {
     }
 }
 
+/// Whether a Post*Item result means the item really went through. Skips,
+/// "keep the existing one" and failures report other codes.
+fn item_done(hr: HRESULT) -> bool {
+    // COPYENGINE_S_* (winerror.h, FACILITY_SHELL 0x27)
+    const DONT_PROCESS_CHILDREN: i32 = 0x0027_0008; // folder handled as one unit
+    const MERGE: i32 = 0x0027_0006; // merged into an existing folder
+    const KEEP_BOTH: i32 = 0x0027_000C;
+    const COLLISION_RESOLVED: i32 = 0x0027_000E;
+    hr == S_OK
+        || matches!(
+            hr.0,
+            DONT_PROCESS_CHILDREN | MERGE | KEEP_BOTH | COLLISION_RESOLVED
+        )
+}
+
 /// Collects what an IFileOperation actually did (IFileOperationProgressSink).
 #[implement(IFileOperationProgressSink)]
 struct OpSink {
@@ -788,14 +803,16 @@ impl OpSink {
         new: Ref<'_, IShellItem>,
         need_new: bool,
     ) {
-        // S_OK only: a skipped item reports a COPYENGINE_S_* success code
-        if hr != S_OK {
+        let src = src.as_ref().and_then(fs_path);
+        let dst = new.as_ref().and_then(fs_path);
+        #[cfg(test)]
+        println!("  sink: hr={:#010x} src={src:?} new={dst:?}", hr.0 as u32);
+        if !item_done(hr) {
             return;
         }
-        let Some(src) = src.as_ref().and_then(fs_path) else {
+        let Some(src) = src else {
             return;
         };
-        let dst = new.as_ref().and_then(fs_path);
         if need_new && dst.is_none() {
             return;
         }
@@ -2389,6 +2406,8 @@ mod tests {
         assert!(done[0].dst.as_ref().unwrap().join("inner.txt").is_file());
         // move
         let done = move_with(&[d.join("to").join("a.txt")], &d.join("dir"), FOF_NO_UI).unwrap();
+        println!("move -> {done:?}");
+        assert_eq!(done.len(), 1, "move reported nothing");
         assert!(crate::same_path(
             done[0].dst.as_ref().unwrap(),
             &long_path(&d.join("dir").join("a.txt"))
