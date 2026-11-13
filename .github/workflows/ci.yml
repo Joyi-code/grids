@@ -84,9 +84,25 @@ jobs:
       - name: Clippy (Windows platform layer)
         run: cargo clippy --release --locked -p grids_shell --all-targets
 
-      # users get grids.exe alone; its hash goes to the log and the run summary
+      # the previous build's size on this branch (falls back to main's), for the delta
+      - name: Restore previous size
+        uses: actions/cache/restore@v4
+        with:
+          path: .size
+          key: exe-size-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            exe-size-${{ github.ref_name }}-
+            exe-size-main-
+
+      # users get grids.exe alone; its hash goes to the log and the run summary.
+      # Size gate: grids.exe over 5,300,000 bytes fails the job.
       - name: Collect grids.exe
         shell: pwsh
+        env:
+          SIZE_LIMIT: 5300000
+          # v0.9 feature budget (400 KB) counts from the last measured pre-v0.9 build
+          BASELINE_COMMIT: 7d7948c
+          BASELINE_BYTES: 4863488
         run: |
           New-Item -ItemType Directory -Force dist, symbols | Out-Null
           Copy-Item target/release/grids.exe dist/grids.exe
@@ -100,7 +116,28 @@ jobs:
           "|---|---|" >> $env:GITHUB_STEP_SUMMARY
           "| Size | $($exe.Length) bytes ($([math]::Round($exe.Length / 1MB, 2)) MiB) |" >> $env:GITHUB_STEP_SUMMARY
           "| SHA256 | ``$hash`` |" >> $env:GITHUB_STEP_SUMMARY
+          function Delta([long]$d) { if ($d -ge 0) { "+$d bytes (+$([math]::Round($d / 1KB, 1)) KiB)" } else { "$d bytes ($([math]::Round($d / 1KB, 1)) KiB)" } }
+          $prev = if (Test-Path .size/grids.exe.txt) { (Get-Content .size/grids.exe.txt -Raw).Trim() -split '\s+' } else { @() }
+          if ($prev.Count -ge 2) {
+            "| vs previous build ($($prev[1].Substring(0, 7))) | $(Delta ($exe.Length - [long]$prev[0])) |" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "| vs previous build | (no earlier size cached) |" >> $env:GITHUB_STEP_SUMMARY
+          }
+          "| vs $env:BASELINE_COMMIT ($env:BASELINE_BYTES bytes) | $(Delta ($exe.Length - [long]$env:BASELINE_BYTES)) |" >> $env:GITHUB_STEP_SUMMARY
+          "| Limit | $env:SIZE_LIMIT bytes |" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
+          if ($exe.Length -gt [long]$env:SIZE_LIMIT) {
+            "::error::grids.exe is $($exe.Length) bytes, over the $env:SIZE_LIMIT-byte limit"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force .size | Out-Null
+          "$($exe.Length) $env:GITHUB_SHA" | Set-Content .size/grids.exe.txt
+
+      - name: Save size
+        uses: actions/cache/save@v4
+        with:
+          path: .size
+          key: exe-size-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload grids.exe
         uses: actions/upload-artifact@v5
@@ -150,17 +187,59 @@ jobs:
             cargo install cargo-bloat --locked
           }
 
+      - name: Restore previous bloat
+        uses: actions/cache/restore@v4
+        with:
+          path: .bloat
+          key: bloat-crates-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bloat-crates-${{ github.ref_name }}-
+            bloat-crates-main-
+
       - name: cargo bloat
         shell: pwsh
         run: |
           $fns = cargo bloat --release --locked --bin grids -n 30 2>&1 | Out-String
-          # the second run reuses the first build
+          # the next runs reuse the first build
           $crates = cargo bloat --release --locked --bin grids --crates -n 30 2>&1 | Out-String
+          $json = cargo bloat --release --locked --bin grids --crates -n 0 --message-format json 2>$null | Select-Object -Last 1
           $fns
           $crates
           $exe = Get-Item target/release/grids.exe
           "## Size report (cargo bloat)" >> $env:GITHUB_STEP_SUMMARY
           "This build keeps full debug info for the analysis; the shipped grids.exe size is in the Windows build job's summary (this one: $($exe.Length) bytes)." >> $env:GITHUB_STEP_SUMMARY
+          # .text per crate against the previous run on this branch
+          try {
+            $now = $json | ConvertFrom-Json
+            $prevFile = '.bloat/crates.json'
+            if (Test-Path $prevFile) {
+              $prev = Get-Content $prevFile -Raw | ConvertFrom-Json
+              $old = @{}; foreach ($c in $prev.crates) { $old[$c.name] = [long]$c.size }
+              $new = @{}; foreach ($c in $now.crates) { $new[$c.name] = [long]$c.size }
+              $rows = foreach ($n in (@($old.Keys) + @($new.Keys) | Sort-Object -Unique)) {
+                $d = [long]$new[$n] - [long]$old[$n]
+                if ($d -ne 0) { [pscustomobject]@{ Crate = $n; Delta = $d; Now = [long]$new[$n] } }
+              }
+              $textDelta = [long]$now.'text-section-size' - [long]$prev.'text-section-size'
+              "### Change since previous build ($((Get-Content .bloat/sha.txt -ErrorAction SilentlyContinue) -replace '^(.{7}).*','$1'))" >> $env:GITHUB_STEP_SUMMARY
+              ".text: $([long]$prev.'text-section-size') -> $([long]$now.'text-section-size') bytes ($('{0:+#;-#;0}' -f $textDelta))" >> $env:GITHUB_STEP_SUMMARY
+              "" >> $env:GITHUB_STEP_SUMMARY
+              "| Crate | Delta bytes | Now |" >> $env:GITHUB_STEP_SUMMARY
+              "|---|---:|---:|" >> $env:GITHUB_STEP_SUMMARY
+              foreach ($r in ($rows | Sort-Object { [math]::Abs($_.Delta) } -Descending | Select-Object -First 20)) {
+                "| $($r.Crate) | $('{0:+#;-#;0}' -f $r.Delta) | $($r.Now) |" >> $env:GITHUB_STEP_SUMMARY
+              }
+              if (-not $rows) { "| (no change) | 0 | |" >> $env:GITHUB_STEP_SUMMARY }
+              "" >> $env:GITHUB_STEP_SUMMARY
+            } else {
+              "(no earlier bloat report cached, delta starts with the next build)" >> $env:GITHUB_STEP_SUMMARY
+            }
+            New-Item -ItemType Directory -Force .bloat | Out-Null
+            $json | Set-Content .bloat/crates.json
+            $env:GITHUB_SHA | Set-Content .bloat/sha.txt
+          } catch {
+            "(bloat delta unavailable: $_)" >> $env:GITHUB_STEP_SUMMARY
+          }
           "### Largest functions" >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
           ($fns -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
@@ -169,6 +248,13 @@ jobs:
           '```' >> $env:GITHUB_STEP_SUMMARY
           ($crates -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|warning|note|Finished|Analyzing)' }) -join "`n" | ForEach-Object { $_.TrimEnd() } >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Save bloat
+        if: hashFiles('.bloat/crates.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .bloat
+          key: bloat-crates-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   offline:
     name: Offline check (no networking crates)
