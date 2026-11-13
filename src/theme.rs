@@ -294,6 +294,12 @@ impl Theme {
     pub fn field_edge() -> Hsla { ca(craft::B500, 0.6) }
     pub fn split_active() -> Hsla { ca(craft::B500, 0.5) }
     pub fn drop_target() -> Hsla { ca(craft::B500, 0.10) }
+    /// Destructive actions (the delete button): a firm red, softer and less
+    /// saturated on the dark page.
+    pub fn danger() -> Hsla { if dark() { rgb(0xc4574f).into() } else { rgb(0xd92d20).into() } }
+    pub fn danger_hover() -> Hsla { if dark() { rgb(0xb24c45).into() } else { rgb(0xc0261a).into() } }
+    /// The keyboard focus ring on dialog buttons.
+    pub fn focus_ring() -> Hsla { ca(craft::B500, 0.55) }
 }
 
 // ---- file type colours (fallback icons when the system gives none)

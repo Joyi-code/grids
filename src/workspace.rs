@@ -18,7 +18,7 @@ use std::time::Duration;
 
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -39,6 +39,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, c),
         KeyBinding::new("secondary-shift-g", PickLayout, c),
         KeyBinding::new("escape", CloseAbout, Some("About")),
+        // Dialogs: Esc cancels; Enter / Space press the focused button (Cancel
+        // when the dialog opens); Tab and the arrows move between buttons.
+        KeyBinding::new("escape", DialogCancel, Some("Dialog")),
+        KeyBinding::new("enter", DialogAccept, Some("Dialog")),
+        KeyBinding::new("space", DialogAccept, Some("Dialog")),
+        KeyBinding::new("tab", DialogNext, Some("Dialog")),
+        KeyBinding::new("shift-tab", DialogNext, Some("Dialog")),
+        KeyBinding::new("left", DialogNext, Some("Dialog")),
+        KeyBinding::new("right", DialogNext, Some("Dialog")),
         KeyBinding::new("ctrl-alt-shift-left", SwapLeft, c),
         KeyBinding::new("ctrl-alt-shift-right", SwapRight, c),
         KeyBinding::new("ctrl-alt-shift-up", SwapUp, c),
@@ -79,6 +88,17 @@ impl Render for SidebarDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement { Empty }
 }
 
+/// A confirmation dialog (GPUI-drawn, like the menus): title, message, the
+/// destructive button's label and what it does.
+struct Confirm {
+    title: SharedString,
+    body: SharedString,
+    ok: SharedString,
+    action: Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>,
+    /// The focused button: 0 Cancel (the default), 1 the action.
+    focus: u8,
+}
+
 pub struct Workspace {
     panes: Vec<Entity<PaneView>>,
     active: usize,
@@ -88,6 +108,11 @@ pub struct Workspace {
     /// The About dialog: None when closed, else the tab (0 licence, 1 third-party notices).
     about: Option<u8>,
     about_focus: FocusHandle,
+    /// The version popover (from the version label at the bottom left).
+    version_pop: bool,
+    version_btn: Rc<Cell<Bounds<Pixels>>>,
+    confirm: Option<Confirm>,
+    dialog_focus: FocusHandle,
     /// The picker's "by column" editor: panes per column (0 = no column),
     /// and whether the mouse is held down on it.
     col_draft: [usize; 4],
@@ -119,6 +144,10 @@ impl Workspace {
             picker: false,
             about: None,
             about_focus: cx.focus_handle(),
+            version_pop: false,
+            version_btn: Rc::default(),
+            confirm: None,
+            dialog_focus: cx.focus_handle(),
             col_draft: [0; 4],
             col_dragging: false,
             grid_bounds: Rc::default(),
@@ -407,7 +436,6 @@ impl Workspace {
                     .tip(if self.maximized.is_some() { tr(cx, "还原宫格", "Restore grid") } else { tr(cx, "最大化当前窗格", "Maximize pane") }, Some("Ctrl+Shift+M"))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx))),
             )
-            .child(header_icon("about", "info", 32., 17.).ml(px(2.)).tip(tr(cx, "关于 Grids", "About Grids"), None).on_click(cx.listener(|this, _, window, cx| { this.about = Some(0); this.about_focus.focus(window); cx.notify() })))
             .child(header_icon("theme", theme_icon, 32., 17.).ml(px(2.)).tip(theme_tip, None).on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))))
             .children(controls)
             .when(!has_controls, |d| d.pr(px(8.)))
@@ -486,6 +514,198 @@ impl Workspace {
                     .child(panel),
             )
             .with_priority(4)
+            .into_any_element(),
+        )
+    }
+
+    // ---- version popover and confirmation dialogs
+
+    /// "v0.8.0" at the bottom left (the sidebar's foot, or the status bar's
+    /// start while the sidebar is hidden); opens the version popover.
+    fn version_label(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let b = self.version_btn.clone();
+        div().id("version").relative().h(px(24.)).px(px(8.)).rounded(px(6.)).flex().flex_none().items_center().cursor_pointer()
+            .text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).whitespace_nowrap()
+            .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
+            .when(self.version_pop, |d| d.bg(Theme::fill_hover_strong()).text_color(Theme::text()))
+            .child(concat!("v", env!("CARGO_PKG_VERSION")))
+            .child(canvas(move |bounds, _, _| b.set(bounds), |_, _, _, _| {}).absolute().size_full())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.version_pop = !this.version_pop;
+                if this.version_pop { this.dialog_focus.focus(window) } else { this.refocus(window, cx) }
+                cx.notify();
+            }))
+    }
+
+    /// Focus back to the active pane after a popover or dialog closes.
+    fn refocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let p = self.panes.get(self.active).cloned();
+        if let Some(p) = p { p.update(cx, |p, _| p.focus.clone()).focus(window) }
+        cx.notify();
+    }
+
+    fn close_version_pop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.version_pop = false;
+        self.refocus(window, cx);
+    }
+
+    /// The version popover: version and build, the licences, the project
+    /// address as plain text (Grids never goes online).
+    fn render_version_pop(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.version_pop { return None }
+        let btn = self.version_btn.get();
+        let vh = window.viewport_size().height;
+        let row = |label: &'static str, value: String| {
+            div().h(px(24.)).flex().items_center().gap(px(12.))
+                .child(div().w(px(64.)).flex_none().text_color(Theme::text_caption()).child(label))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
+        };
+        let platform = format!("{} {}", match std::env::consts::OS { "windows" => "Windows", "linux" => "Linux", "macos" => "macOS", o => o }, std::env::consts::ARCH);
+        let panel = div()
+            .id("version-pop")
+            .absolute()
+            .left(btn.left())
+            .bottom(vh - btn.top() + px(6.))
+            .w(px(288.))
+            .py(px(4.))
+            .flex()
+            .flex_col()
+            .bg(theme::raised(Theme::popover_bg()))
+            .border_1()
+            .border_color(Theme::line_border())
+            .rounded(px(8.))
+            .shadow(theme::shadow_menu())
+            .font_family(theme::UI_FONT)
+            .text_size(px(13.))
+            .text_color(Theme::text())
+            .occlude()
+            .track_focus(&self.dialog_focus)
+            .key_context("Dialog")
+            .on_action(cx.listener(|this, _: &DialogCancel, window, cx| this.close_version_pop(window, cx)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div().flex().items_center().gap(px(10.)).px(px(14.)).pt(px(10.)).pb(px(8.))
+                    .child(img("icon/grids-48.png").size(px(32.)).flex_none())
+                    .child(div().flex().flex_col()
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Grids"))
+                        .child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器", "Multi-pane file manager")))),
+            )
+            .child(
+                div().px(px(14.)).pb(px(6.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
+                    .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string()))
+                    .child(row(tr(cx, "提交", "Commit"), env!("GRIDS_GIT_HASH").to_string()))
+                    .child(row(tr(cx, "构建日期", "Built"), env!("GRIDS_BUILD_DATE").to_string()))
+                    .child(row(tr(cx, "平台", "Platform"), platform))
+                    .child(row(tr(cx, "项目", "Project"), "github.com/Joyi-code/grids".to_string())),
+            )
+            .child(div().h(px(9.)).flex().items_center().mx(px(12.)).child(div().h(px(1.)).flex_1().bg(Theme::line_divider())))
+            .child(
+                div().id("version-licences").h(px(30.)).mx(px(4.)).pl(px(8.)).pr(px(10.)).rounded(px(6.)).flex().items_center().cursor_pointer()
+                    .hover(|s| s.bg(Theme::fill_hover_strong())).active(|s| s.bg(Theme::fill_pressed()))
+                    .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(8.)).child(icon("file-text", 16., Theme::icon())))
+                    .child(div().flex_1().child(tr(cx, "许可证与第三方声明", "Licence and third-party notices")))
+                    .child(icon("chevron-right", 14., Theme::icon_muted()))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.version_pop = false;
+                        this.about = Some(0);
+                        this.about_focus.focus(window);
+                        cx.notify();
+                    })),
+            )
+            .child(div().px(px(14.)).pt(px(4.)).pb(px(8.)).text_size(px(11.)).text_color(Theme::text_placeholder()).child(tr(cx, "Grids 完全离线运行，不连接网络。", "Grids runs fully offline and never connects to the network.")));
+        Some(
+            deferred(
+                div().id("version-pop-scrim").absolute().inset_0().occlude()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_version_pop(window, cx)))
+                    .child(panel),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
+    }
+
+    fn ask_delete_session(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let en = state::en(cx);
+        let body = if en { format!("Delete the session “{name}”? This can't be undone.") } else { format!("确定删除会话「{name}」？此操作无法撤销。") };
+        self.confirm = Some(Confirm {
+            title: tr(cx, "删除会话", "Delete session").into(),
+            body: body.into(),
+            ok: tr(cx, "删除", "Delete").into(),
+            action: Rc::new(move |this, _, cx| {
+                cx.global_mut::<Shared>().config.delete_session(&name);
+                this.schedule_save(cx);
+            }),
+            focus: 0,
+        });
+        self.dialog_focus.focus(window);
+        cx.notify();
+    }
+
+    fn close_confirm(&mut self, accept: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.confirm.take() else { return };
+        if accept { (c.action)(self, window, cx) }
+        self.refocus(window, cx);
+    }
+
+    /// The confirmation card: centred, 360 wide, on a dim scrim (a click on
+    /// it cancels); the menus' surface, hairline, radius and shadow.
+    fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let c = self.confirm.as_ref()?;
+        let button = |id: &'static str, label: SharedString, danger: bool, focused: bool| {
+            div().id(id).h(px(30.)).min_w(px(76.)).px(px(14.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
+                .border_2().border_color(if focused { Theme::focus_ring() } else { gpui::transparent_black() })
+                .map(|d| if danger {
+                    d.bg(Theme::danger()).text_color(gpui::white()).font_weight(FontWeight::MEDIUM).hover(|s| s.bg(Theme::danger_hover()))
+                } else {
+                    d.bg(Theme::fill_hover_strong()).text_color(Theme::text()).hover(|s| s.bg(Theme::fill_pressed()))
+                })
+                .child(label)
+        };
+        let card = div()
+            .id("confirm")
+            .w(px(360.))
+            .p(px(20.))
+            .pb(px(16.))
+            .flex()
+            .flex_col()
+            .bg(theme::raised(Theme::popover_bg()))
+            .border_1()
+            .border_color(Theme::line_border())
+            .rounded(px(8.))
+            .shadow(theme::shadow_menu())
+            .font_family(theme::UI_FONT)
+            .text_size(px(13.))
+            .text_color(Theme::text())
+            .occlude()
+            .track_focus(&self.dialog_focus)
+            .key_context("Dialog")
+            .on_action(cx.listener(|this, _: &DialogCancel, window, cx| this.close_confirm(false, window, cx)))
+            .on_action(cx.listener(|this, _: &DialogAccept, window, cx| {
+                let accept = this.confirm.as_ref().is_some_and(|c| c.focus == 1);
+                this.close_confirm(accept, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DialogNext, _, cx| {
+                if let Some(c) = &mut this.confirm { c.focus ^= 1 }
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(c.title.clone()))
+            .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(ui_text(c.body.clone())))
+            .child(
+                div().mt(px(20.)).flex().justify_end().gap(px(8.))
+                    .child(button("confirm-cancel", tr(cx, "取消", "Cancel").into(), false, c.focus == 0)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx))))
+                    .child(button("confirm-ok", c.ok.clone(), true, c.focus == 1)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_confirm(true, window, cx)))),
+            );
+        Some(
+            deferred(
+                div().id("confirm-scrim").absolute().inset_0().flex().items_center().justify_center().bg(gpui::black().opacity(0.18)).occlude()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx)))
+                    .child(card)
+                    .with_animation("confirm-fade", Animation::new(Duration::from_millis(110)), |d, t| d.opacity(t)),
+            )
+            .with_priority(5)
             .into_any_element(),
         )
     }
@@ -682,11 +902,9 @@ impl Workspace {
                         div().id(("session-x", i)).absolute().right(px(4.)).invisible().group_hover("side-item", |s| s.visible()).size(px(22.)).rounded(px(6.)).flex().items_center().justify_center().hover(|s| s.bg(Theme::fill_hover_strong()))
                             .child(icon("x", 14., Theme::icon()))
                             .tip(tr(cx, "删除会话", "Delete session"), None)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                cx.global_mut::<Shared>().config.delete_session(&del);
-                                this.schedule_save(cx);
-                                cx.notify();
+                                this.ask_delete_session(del.clone(), window, cx);
                             })),
                     )
                     .relative(),
@@ -708,6 +926,7 @@ impl Workspace {
                     .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(img("icon/grids-48.png").size(px(20.)).flex_none()).child(div().font_weight(FontWeight::SEMIBOLD).child("Grids"))),
             )
             .child(col)
+            .child(div().flex_none().h(px(40.)).px(px(SB_X)).flex().items_center().child(self.version_label(cx)))
             .child(
                 div().id("sidebar-resize").absolute().right(px(-3.)).top_0().h_full().w(px(6.)).cursor(CursorStyle::ResizeColumn)
                     .on_drag(SidebarDrag, |d, _, _, cx| cx.new(|_| d.clone())),
@@ -792,18 +1011,20 @@ impl Workspace {
             if st.show_hidden { left += if en { "    Showing hidden items" } else { "    显示隐藏项目" } }
         }
         let pane_no = if en { format!("Pane {}", self.active + 1) } else { format!("窗格 {}", self.active + 1) };
+        let sidebar_open = state::shared(cx).config.sidebar_open;
         div()
             .h(px(STATUS_H))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(12.))
-            .pl(px(22.))
+            .pl(px(if sidebar_open { 22. } else { 8. }))
             .pr(px(16.))
             .border_t_1()
             .border_color(Theme::line_divider())
             .text_size(px(theme::UI_SMALL))
             .text_color(Theme::text_caption())
+            .when(!sidebar_open, |d| d.child(self.version_label(cx)))
             .child(div().flex_none().whitespace_nowrap().child(pane_no))
             .child(div().flex_none().whitespace_nowrap().child(left))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(Theme::text()).children(self.toast.as_ref().map(|t| ui_text(t.0.clone()))))
@@ -882,7 +1103,9 @@ impl Render for Workspace {
                     .child(self.render_status(cx)),
             )
             .children(self.render_picker(cx))
+            .children(self.render_version_pop(window, cx))
             .children(self.render_about(window, cx))
+            .children(self.render_confirm(cx))
     }
 }
 
