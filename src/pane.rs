@@ -143,6 +143,9 @@ pub enum PaneEvent {
     Listed,
     /// A link-group command from the title menu.
     Link(LinkCmd),
+    /// Check who holds `paths`; run `then` once nobody does (None: just
+    /// show the result, the menu's 查看占用).
+    Lockers { paths: Vec<PathBuf>, then: Option<crate::workspace::LockersThen> },
 }
 
 /// What the title menu asks of the link groups.
@@ -718,7 +721,14 @@ impl PaneView {
             cx.emit(PaneEvent::Toast(tr(cx, "文件名不能包含下列字符：\\ / : * ? \" < > |", "A file name can't contain \\ / : * ? \" < > |").into()));
             return;
         }
-        let (path, pane, en) = (r.path.clone(), Some(self.index), state::en(cx));
+        let me = cx.entity().downgrade();
+        let (p2, n2) = (r.path.clone(), name.clone());
+        let then: crate::workspace::LockersThen = Rc::new(move |_, cx| { let (p, n) = (p2.clone(), n2.clone()); let _ = me.update(cx, |this, cx| this.rename_now(p, n, cx)); });
+        cx.emit(PaneEvent::Lockers { paths: vec![r.path.clone()], then: Some(then) });
+    }
+
+    fn rename_now(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
+        let (pane, en) = (Some(self.index), state::en(cx));
         let to = name.clone();
         cx.spawn(async move |this, cx| {
             let res = cx.background_executor().spawn(async move {
@@ -858,6 +868,20 @@ impl PaneView {
         // Last line of defence for every route here (keys, menus, drops).
         if !matches!(op, Op::Copy) && self.refuse_locked(&paths, cx) { return }
         if let Some(d) = &dest && self.refuse_locked(std::slice::from_ref(d), cx) { return }
+        if op == Op::Move {
+            // Moves wait until nothing holds the files.
+            let me = cx.entity().downgrade();
+            let p2 = paths.clone();
+            let then: crate::workspace::LockersThen = Rc::new(move |_, cx| {
+                let (paths, dest, select) = (p2.clone(), dest.clone(), select.clone());
+                let _ = me.update(cx, |this, cx| this.run_op_now(op, paths, dest, select, cx));
+            });
+            return cx.emit(PaneEvent::Lockers { paths, then: Some(then) });
+        }
+        self.run_op_now(op, paths, dest, select, cx)
+    }
+
+    fn run_op_now(&mut self, op: Op, paths: Vec<PathBuf>, dest: Option<PathBuf>, select: Vec<String>, cx: &mut Context<Self>) {
         let mut dirs: Vec<PathBuf> = paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
         if let Some(d) = &dest { dirs.push(d.clone()) }
         dirs.sort();
@@ -945,6 +969,7 @@ impl PaneView {
                 v.push(Item::row(if fav { t("从收藏夹移除", "Remove from favourites") } else { t("添加到收藏夹", "Add to favourites") }, if fav { "star-off" } else { "star" }, "", Cmd::ToggleFavourite(dir.clone())));
             }
             v.push(Item::row(t("在资源管理器中显示", "Show in Explorer"), "folder-search", "", Cmd::Reveal));
+            v.push(Item::row(t("查看占用", "Who's using it"), "file-lock", "", Cmd::Lockers));
             v.push(Item::row(t("属性", "Properties"), "info", "Alt+Enter", Cmd::Properties).enabled(cfg!(windows)));
             if !ro { v.push(Item::Sep); v.push(more) }
             v
@@ -1096,6 +1121,7 @@ impl PaneView {
             Cmd::Shelve => self.shelve(cx),
             Cmd::EditNote(p) => cx.emit(PaneEvent::EditNote(p)),
             Cmd::Link(c) => cx.emit(PaneEvent::Link(c)),
+            Cmd::Lockers => if !targets.is_empty() { cx.emit(PaneEvent::Lockers { paths: targets.clone(), then: None }) },
             Cmd::Rename => self.start_rename(window, cx),
             Cmd::Delete => self.ask_delete(false, cx),
             Cmd::Zip => if let Some(p) = first && !self.refuse_locked(std::slice::from_ref(&dir), cx) {

@@ -19,6 +19,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 mod link;
+mod lockers;
+pub use lockers::Then as LockersThen;
 mod palette;
 mod today;
 
@@ -158,6 +160,7 @@ pub struct Workspace {
     note_edit: Option<NoteEdit>,
     palette: Option<palette::Palette>,
     today: Option<today::Today>,
+    lockers: Option<lockers::LockersDlg>,
     _subs: Vec<Subscription>,
 }
 
@@ -198,6 +201,7 @@ impl Workspace {
             note_edit: None,
             palette: None,
             today: None,
+            lockers: None,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -233,6 +237,7 @@ impl Workspace {
             PaneEvent::DiskChanged(dir) => this.today_disk_changed(dir, cx),
             PaneEvent::Moved(path) => if let Some(i) = this.panes.iter().position(|p| p == pane) { this.link_moved(i, path, cx) },
             PaneEvent::Listed => if !state::shared(cx).config.current.links.is_empty() { this.sync_links(cx) },
+            PaneEvent::Lockers { paths, then } => this.check_lockers(paths.clone(), then.clone(), window, cx),
             PaneEvent::Link(c) => if let Some(i) = this.panes.iter().position(|p| p == pane) { this.link_cmd(i, c, cx) },
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
             PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
@@ -739,7 +744,18 @@ impl Workspace {
     /// Delete / Shift+Delete in a pane: our confirmation, then the delete
     /// without any system prompt. A drive without a recycle bin gets the
     /// permanent wording (that check runs off the UI thread).
+    /// Deletes wait until nothing holds the files (see lockers.rs).
     fn ask_delete_files(&mut self, pane: Entity<PaneView>, paths: Vec<PathBuf>, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = cx.entity().downgrade();
+        let p2 = paths.clone();
+        let then: lockers::Then = Rc::new(move |window, cx| {
+            let (pane, paths) = (pane.clone(), p2.clone());
+            let _ = ws.update(cx, |ws, cx| ws.ask_delete_unlocked(pane, paths, permanent, window, cx));
+        });
+        self.check_lockers(paths, Some(then), window, cx);
+    }
+
+    fn ask_delete_unlocked(&mut self, pane: Entity<PaneView>, paths: Vec<PathBuf>, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
         if permanent { return self.show_delete_confirm(pane, paths, true, window, cx) }
         let probe = paths.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -1286,7 +1302,17 @@ impl Workspace {
 
     /// The shelf's present entries, copied or moved into the active pane's
     /// folder in one journalled operation; the shelf empties on success.
-    fn shelf_to_pane(&mut self, op: Op, cx: &mut Context<Self>) {
+    fn shelf_to_pane(&mut self, op: Op, window: &mut Window, cx: &mut Context<Self>) {
+        if op == Op::Move {
+            let paths: Vec<PathBuf> = state::shared(cx).config.shelf.clone();
+            let ws = cx.entity().downgrade();
+            let then: lockers::Then = Rc::new(move |_, cx| { let _ = ws.update(cx, |ws, cx| ws.shelf_run(op, cx)); });
+            return self.check_lockers(paths, Some(then), window, cx);
+        }
+        self.shelf_run(op, cx)
+    }
+
+    fn shelf_run(&mut self, op: Op, cx: &mut Context<Self>) {
         if self.shelf_busy { return }
         let Some(pane) = self.active_pane().cloned() else { return };
         let dest = pane.read(cx).state.path.clone();
@@ -1395,10 +1421,10 @@ impl Workspace {
                 .child(cards)
                 .child(action("shelf-copy", "copy", t("复制到当前格子", "Copy here"), can_copy)
                     .when_some(blocked, |d, why| d.tip(why, None))
-                    .when(can_copy, |d| d.on_click(cx.listener(|this, _, _, cx| this.shelf_to_pane(Op::Copy, cx)))))
+                    .when(can_copy, |d| d.on_click(cx.listener(|this, _, window, cx| this.shelf_to_pane(Op::Copy, window, cx)))))
                 .child(action("shelf-move", "folder-input", t("移动到当前格子", "Move here"), can_move)
                     .when_some(move_tip, |d, why| d.tip(why, None))
-                    .when(can_move, |d| d.on_click(cx.listener(|this, _, _, cx| this.shelf_to_pane(Op::Move, cx)))))
+                    .when(can_move, |d| d.on_click(cx.listener(|this, _, window, cx| this.shelf_to_pane(Op::Move, window, cx)))))
                 .child(action("shelf-clear", "trash-2", t("清空", "Clear"), !shelf.is_empty())
                     .when(!shelf.is_empty(), |d| d.tip(t("清空暂存架（不删除文件）", "Empty the shelf (files stay)"), None).on_click(cx.listener(|this, _, _, cx| this.set_shelf(|s| s.clear(), cx)))))
                 .into_any_element(),
@@ -1530,6 +1556,7 @@ impl Render for Workspace {
             .children(self.render_version_pop(window, cx))
             .children(self.render_about(window, cx))
             .children(self.render_confirm(cx))
+            .children(self.render_lockers(cx))
             .children(self.render_note_edit(cx))
             .children(self.render_palette(cx))
     }

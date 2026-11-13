@@ -67,6 +67,8 @@ pub enum Cmd {
     View(grids_core::ViewMode),
     /// Pane title menu: link with pane N, leave the group, compare on/off.
     Link(crate::pane::LinkCmd),
+    /// 查看占用: who has the selection open.
+    Lockers,
 }
 
 #[derive(Clone)]

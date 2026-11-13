@@ -46,7 +46,7 @@ mod tests {
     /// a missing one draws nothing (the hidden sidebar toggle was one).
     #[test]
     fn icons_used_are_bundled() {
-        let srcs = [include_str!("pane.rs"), include_str!("workspace.rs"), include_str!("ui.rs"), include_str!("menu.rs"), include_str!("workspace/palette.rs"), include_str!("workspace/today.rs"), include_str!("workspace/link.rs")];
+        let srcs = [include_str!("pane.rs"), include_str!("workspace.rs"), include_str!("ui.rs"), include_str!("menu.rs"), include_str!("workspace/palette.rs"), include_str!("workspace/today.rs"), include_str!("workspace/link.rs"), include_str!("workspace/lockers.rs")];
         let mut missing = vec![];
         for src in srcs {
             for (pat, skip) in [("icon(\"", 0), ("header_icon(", 1), ("glyph: \"", 0)] {
