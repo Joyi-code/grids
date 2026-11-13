@@ -2,7 +2,10 @@
 //! the version GPUI 0.2.2 uses). Ported in spirit from the original Grids
 //! (efww/grids, MIT), re-written for a GPUI-drawn app.
 
-use crate::{Drive, KnownFolder, KnownFolderKind, MenuAction, RgbaImage, parent_is};
+use crate::{
+    Drive, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, RgbaImage, classify_target,
+    parent_is,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
@@ -10,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, WPARAM,
+    ERROR_NO_ASSOCIATION, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT,
+    RPC_E_CHANGED_MODE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -18,11 +22,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, GetDriveTypeW,
-    GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
+    GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, CoUninitialize,
+    CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile, STGM_READ,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
@@ -31,6 +35,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SetThreadErrorMode, THREAD_ERROR_MODE,
 };
+use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
@@ -44,18 +49,18 @@ use windows::Win32::UI::Shell::{
     FOF_WANTNUKEWARNING, FOFX_ADDUNDORECORD, FOFX_RECYCLEONDELETE, FOLDERID_Desktop,
     FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Pictures, FOLDERID_Profile, FileOperation,
     GCS_VERBW, HDROP, IContextMenu, IContextMenu2, IContextMenu3, IFileOperation, ILFree,
-    IShellFolder, IShellItem, IShellItemArray, KF_FLAG_DEFAULT, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromIDLists, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
-    SHGetDesktopFolder, SHGetFileInfoW, SHGetImageList, SHGetKnownFolderPath, SHIL_EXTRALARGE,
-    SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    ShellExecuteW,
+    IShellFolder, IShellItem, IShellItemArray, IShellLinkW, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI,
+    SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SHCreateItemFromParsingName,
+    SHCreateShellItemArrayFromIDLists, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_SYSICONINDEX,
+    SHGFI_USEFILEATTRIBUTES, SHGetDesktopFolder, SHGetFileInfoW, SHGetImageList,
+    SHGetKnownFolderPath, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE, SHIL_SMALL,
+    SHOpenFolderAndSelectItems, SHParseDisplayName, SLGP_RAWPATH, ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, GWLP_USERDATA, GetIconInfo, GetWindowLongPtrW, HICON, HMENU, ICONINFO,
-    PostMessageW, RegisterClassExW, SW_SHOWNORMAL, SetWindowLongPtrW, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM, WM_INITMENUPOPUP,
-    WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NCCREATE, WM_NULL, WNDCLASSEXW, WS_POPUP,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
+    GetIconInfo, HICON, HMENU, ICONINFO, PostMessageW, RegisterClassExW, SW_SHOWNORMAL,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM,
+    WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NULL, WNDCLASSEXW, WS_POPUP,
 };
 use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, w};
 
@@ -89,6 +94,12 @@ fn ensure_com() {
     COM.with(|_| {});
 }
 
+/// A NUL-terminated (or full) UTF-16 buffer as a String.
+fn from_wide(buf: &[u16]) -> String {
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(buf.get(..n).unwrap_or_default())
+}
+
 fn wide(p: &Path) -> HSTRING {
     HSTRING::from(p.as_os_str())
 }
@@ -120,23 +131,144 @@ impl Drop for Pidl {
 
 // ---------- open / reveal ----------
 
-pub fn open_with_system(path: &Path) -> io::Result<()> {
+/// One ShellExecuteExW call. `verb` null = the default verb, as Explorer's
+/// double click. NOASYNC: done when it returns, so a worker thread may exit
+/// right after. With a PIDL the shell invokes the item's own context menu
+/// (INVOKEIDLIST), which is what Explorer does for .lnk, .url and friends.
+fn shell_execute(
+    verb: PCWSTR,
+    file: &HSTRING,
+    dir: &HSTRING,
+    pidl: Option<&Pidl>,
+    mask: u32,
+) -> windows::core::Result<()> {
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOASYNC | mask,
+        lpVerb: verb,
+        lpFile: PCWSTR(file.as_ptr()),
+        lpDirectory: if dir.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(dir.as_ptr())
+        },
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    if let Some(p) = pidl {
+        sei.fMask |= SEE_MASK_INVOKEIDLIST;
+        sei.lpIDList = p.0 as *mut _;
+    }
+    unsafe { ShellExecuteExW(&mut sei) }
+}
+
+// some handlers report the old ShellExecute code 31 (SE_ERR_NOASSOC) through GetLastError
+const SE_ERR_NOASSOC_HRESULT: windows::core::HRESULT =
+    windows::core::HRESULT(0x8007_001F_u32 as i32);
+
+fn no_association(e: &windows::core::Error) -> bool {
+    e.code() == ERROR_NO_ASSOCIATION.to_hresult() || e.code() == SE_ERR_NOASSOC_HRESULT
+}
+
+/// `openas`: on "no program for this type", show the Open-with dialog.
+fn open_with(path: &Path, openas: bool) -> io::Result<()> {
     ensure_com();
     let file = wide(path);
     let dir = path.parent().map(wide).unwrap_or_default();
-    let run = |verb: PCWSTR| unsafe { ShellExecuteW(None, verb, &file, PCWSTR::null(), &dir, SW_SHOWNORMAL) }.0 as isize;
-    let mut r = run(w!("open"));
-    if r == 31 {
-        // SE_ERR_NOASSOC: no default program, ask the user which one
-        r = run(w!("openas"));
+    let pidl = Pidl::parse(path).ok(); // an unreachable UNC path may have none: lpFile alone then
+    let first = shell_execute(
+        PCWSTR::null(),
+        &file,
+        &dir,
+        pidl.as_ref(),
+        SEE_MASK_FLAG_NO_UI,
+    );
+    let result = match first {
+        Err(e) if openas && no_association(&e) => {
+            shell_execute(w!("openas"), &file, &dir, pidl.as_ref(), 0)
+        }
+        other => other,
+    };
+    result.map_err(|e| {
+        let why = e.message();
+        let why = if why.trim().is_empty() {
+            format!("{:#010x}", e.code().0)
+        } else {
+            why.trim().to_string()
+        };
+        io::Error::other(format!("{}: {why}", path.display()))
+    })
+}
+
+/// Opens like Explorer's double click / Enter: the default verb through the
+/// item's PIDL, in its folder, without UI on the first try (a broken
+/// shortcut or unreachable target comes back as an error with the system's
+/// reason); only "no program for this type" falls back to the Open-with
+/// dialog. Blocks; safe on any thread (STA COM per thread).
+pub fn open_with_system(path: &Path) -> io::Result<()> {
+    open_with(path, true)
+}
+
+// ---------- shortcuts ----------
+
+fn expand_env(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
     }
-    if r <= 32 {
-        Err(io::Error::other(format!(
-            "ShellExecuteW failed ({r}) for {}",
-            path.display()
-        )))
-    } else {
-        Ok(())
+    let src = HSTRING::from(s);
+    let need = unsafe { ExpandEnvironmentStringsW(&src, None) } as usize;
+    if need == 0 {
+        return s.to_string();
+    }
+    let mut buf = vec![0u16; need + 1];
+    let got = unsafe { ExpandEnvironmentStringsW(&src, Some(&mut buf)) } as usize;
+    if got == 0 || got > buf.len() {
+        return s.to_string();
+    }
+    from_wide(&buf)
+}
+
+/// Reads a .lnk without ever resolving it (no link tracking, no search, no
+/// UI): IShellLinkW + IPersistFile::Load, GetPath(SLGP_RAWPATH), env vars
+/// expanded. `Err` when the file is not a shortcut.
+pub fn resolve_link(lnk: &Path) -> io::Result<LinkTarget> {
+    ensure_com();
+    unsafe {
+        let link: IShellLinkW =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(win_err)?;
+        let file: IPersistFile = link.cast().map_err(win_err)?;
+        file.Load(&wide(lnk), STGM_READ).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {e}", lnk.display()),
+            )
+        })?;
+        let mut buf = vec![0u16; 32_768];
+        let mut fd = WIN32_FIND_DATAW::default();
+        // S_FALSE (no file system path) is Ok with an empty buffer
+        if link
+            .GetPath(&mut buf, &mut fd, SLGP_RAWPATH.0 as u32)
+            .is_err()
+        {
+            return Ok(LinkTarget::Other);
+        }
+        let raw = from_wide(&buf);
+        Ok(classify_target(&expand_env(raw.trim())))
+    }
+}
+
+/// Writes a shortcut `lnk` pointing at `target`.
+pub fn create_link(lnk: &Path, target: &Path) -> io::Result<()> {
+    ensure_com();
+    unsafe {
+        let link: IShellLinkW =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(win_err)?;
+        link.SetPath(&wide(target)).map_err(win_err)?;
+        if let Some(dir) = target.parent() {
+            let _ = link.SetWorkingDirectory(&wide(dir));
+        }
+        let file: IPersistFile = link.cast().map_err(win_err)?;
+        file.Save(&wide(lnk), true).map_err(win_err)
     }
 }
 
@@ -242,6 +374,9 @@ unsafe fn load_icon(
         }
         let images: IImageList = SHGetImageList(list as i32).ok()?;
         let hicon = images.GetIcon(sfi.iIcon, ILD_TRANSPARENT.0).ok()?;
+        if hicon.is_invalid() {
+            return None;
+        }
         let img = hicon_to_rgba(hicon);
         let _ = DestroyIcon(hicon);
         img
@@ -324,7 +459,11 @@ unsafe fn hicon_to_rgba(hicon: HICON) -> Option<RgbaImage> {
             for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 p.swap(0, 2); // BGRA -> RGBA
                 if let Some(m) = &mask {
-                    p[3] = if m[i * 4] == 0 { 255 } else { 0 };
+                    p[3] = if m.get(i * 4).copied().unwrap_or(1) == 0 {
+                        255
+                    } else {
+                        0
+                    };
                 }
             }
             RgbaImage::from_raw(w as u32, h as u32, px)
@@ -344,15 +483,15 @@ thread_local! {
 
 unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
-        if msg == WM_NCCREATE {
-            let cs = &*(lp.0 as *const CREATESTRUCTW);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
-        }
         if matches!(
             msg,
             WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR | WM_MENUSELECT
         ) {
-            let cm = ACTIVE_MENU.with(|m| m.borrow().clone());
+            // nothing here may panic: an unwind out of a window procedure aborts
+            let cm = ACTIVE_MENU
+                .try_with(|m| m.try_borrow().ok().and_then(|b| b.clone()))
+                .ok()
+                .flatten();
             if let Some(cm) = cm {
                 if let Ok(cm3) = cm.cast::<IContextMenu3>() {
                     let mut res = LRESULT(0);
@@ -366,7 +505,6 @@ unsafe extern "system" fn host_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 }
             }
         }
-        let _ = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
@@ -439,8 +577,7 @@ fn verb_of(cm: &IContextMenu, offset: u32) -> String {
     if !ok {
         return String::new();
     }
-    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    String::from_utf16_lossy(&buf[..n])
+    from_wide(&buf)
 }
 
 unsafe fn track(hwnd: isize, cm: IContextMenu, pos: (i32, i32), can_rename: bool) -> MenuAction {
@@ -474,7 +611,7 @@ unsafe fn track(hwnd: isize, cm: IContextMenu, pos: (i32, i32), can_rename: bool
         let Some(host) = Host::new(owner) else {
             return MenuAction::Dismissed;
         };
-        ACTIVE_MENU.with(|m| *m.borrow_mut() = Some(cm.clone()));
+        let _ = ACTIVE_MENU.try_with(|m| m.try_borrow_mut().map(|mut b| *b = Some(cm.clone())));
         let picked = TrackPopupMenuEx(
             menu,
             (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
@@ -484,7 +621,7 @@ unsafe fn track(hwnd: isize, cm: IContextMenu, pos: (i32, i32), can_rename: bool
             None,
         )
         .0 as u32;
-        ACTIVE_MENU.with(|m| *m.borrow_mut() = None);
+        let _ = ACTIVE_MENU.try_with(|m| m.try_borrow_mut().map(|mut b| *b = None));
         let _ = PostMessageW(Some(host.0), WM_NULL, WPARAM(0), LPARAM(0));
         if picked < FIRST_CMD {
             return MenuAction::Dismissed;
@@ -670,8 +807,7 @@ pub fn drives() -> Vec<Drive> {
                 if unsafe { GetVolumeInformationW(&wroot, Some(&mut buf), None, None, None, None) }
                     .is_ok()
                 {
-                    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
-                    label = String::from_utf16_lossy(&buf[..n]);
+                    label = from_wide(&buf);
                 }
             }
             Drive {
@@ -815,8 +951,8 @@ pub fn clipboard_get_files() -> Option<(Vec<PathBuf>, bool)> {
         let paths: Vec<PathBuf> = (0..n)
             .map(|k| {
                 let mut buf = vec![0u16; DragQueryFileW(drop, k, None) as usize + 1];
-                let len = DragQueryFileW(drop, k, Some(&mut buf)) as usize;
-                PathBuf::from(String::from_utf16_lossy(&buf[..len]))
+                let len = (DragQueryFileW(drop, k, Some(&mut buf)) as usize).min(buf.len());
+                PathBuf::from(from_wide(buf.get(..len).unwrap_or_default()))
             })
             .collect();
         let mut cut = false;
@@ -839,8 +975,7 @@ fn volume_of(p: &Path) -> Option<String> {
     let existing = p.ancestors().find(|q| q.exists())?;
     let mut buf = [0u16; 261];
     unsafe { GetVolumePathNameW(&wide(existing), &mut buf) }.ok()?;
-    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
-    Some(String::from_utf16_lossy(&buf[..n]).to_lowercase())
+    Some(from_wide(&buf).to_lowercase())
 }
 
 pub fn same_volume(a: &Path, b: &Path) -> bool {
@@ -920,5 +1055,121 @@ mod tests {
         if clipboard_set_files(&files, true).is_ok() {
             assert_eq!(clipboard_get_files(), Some((files, true)));
         }
+    }
+
+    /// Runs `f` on its own thread; fails the test instead of hanging the job.
+    fn within<T: Send + 'static>(
+        secs: u64,
+        what: &str,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs))
+            .unwrap_or_else(|_| panic!("{what}: no answer within {secs} s"))
+    }
+
+    fn same_file(a: &Path, b: &Path) -> bool {
+        std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+    }
+
+    #[test]
+    fn shortcuts_resolve_without_ui() {
+        let d = std::env::temp_dir().join(format!("grids_win_lnk_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("目标 文件夹")).unwrap();
+        std::fs::write(d.join("报告 1.txt"), "x").unwrap();
+        std::fs::write(d.join("gone.txt"), "x").unwrap();
+        create_link(&d.join("dir.lnk"), &d.join("目标 文件夹")).unwrap();
+        create_link(&d.join("file.lnk"), &d.join("报告 1.txt")).unwrap();
+        create_link(&d.join("missing.lnk"), &d.join("gone.txt")).unwrap();
+        std::fs::remove_file(d.join("gone.txt")).unwrap();
+        std::fs::write(d.join("fake.lnk"), "not a shortcut").unwrap();
+
+        match resolve_link(&d.join("dir.lnk")).unwrap() {
+            LinkTarget::Folder(p) => assert!(same_file(&p, &d.join("目标 文件夹")), "{p:?}"),
+            other => panic!("dir.lnk: {other:?}"),
+        }
+        match resolve_link(&d.join("file.lnk")).unwrap() {
+            LinkTarget::File(p) => assert!(same_file(&p, &d.join("报告 1.txt")), "{p:?}"),
+            other => panic!("file.lnk: {other:?}"),
+        }
+        match resolve_link(&d.join("missing.lnk")).unwrap() {
+            LinkTarget::Missing(p) => assert_eq!(p.file_name().unwrap(), "gone.txt"),
+            other => panic!("missing.lnk: {other:?}"),
+        }
+        assert!(!matches!(
+            resolve_link(&d.join("fake.lnk")),
+            Ok(LinkTarget::Folder(_) | LinkTarget::File(_) | LinkTarget::Missing(_))
+        ));
+
+        let unc = Path::new(r"\\localhost\C$\Windows");
+        if unc.is_dir() {
+            create_link(&d.join("unc.lnk"), unc).unwrap();
+            match resolve_link(&d.join("unc.lnk")).unwrap() {
+                LinkTarget::Folder(p) => assert!(
+                    p.to_string_lossy()
+                        .to_lowercase()
+                        .starts_with(r"\\localhost\"),
+                    "{p:?}"
+                ),
+                other => panic!("unc.lnk: {other:?}"),
+            }
+        } else {
+            eprintln!("skipping UNC shortcut: {} not reachable", unc.display());
+        }
+
+        // icons for every kind of shortcut, from several threads at once: no panic
+        let lnks: Vec<PathBuf> = ["dir.lnk", "file.lnk", "missing.lnk", "fake.lnk", "unc.lnk"]
+            .iter()
+            .map(|n| d.join(n))
+            .collect();
+        let workers: Vec<_> = (0..4)
+            .map(|k| {
+                let lnks = lnks.clone();
+                std::thread::spawn(move || {
+                    for p in &lnks {
+                        let _ = file_icon(p, false, [16, 32, 48, 256][k]);
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().expect("file_icon panicked");
+        }
+
+        // a shortcut to nothing opens with an error, not a dialog
+        let missing = d.join("missing.lnk");
+        let r = within(60, "open missing.lnk", move || open_with(&missing, false));
+        assert!(r.is_err(), "missing target opened: {r:?}");
+        eprintln!("missing.lnk: {}", r.unwrap_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn open_like_explorer() {
+        let d = std::env::temp_dir().join(format!("grids_win_open_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let txt = d.join("打开 测试 1.txt");
+        std::fs::write(&txt, "Grids").unwrap();
+        let r = within(60, "open .txt", move || open_with_system(&txt));
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", "notepad.exe", "/F"])
+            .output();
+        assert!(r.is_ok(), "{r:?}");
+        // no extension: no program, and with no Open-with dialog allowed it must just come back
+        let bare = d.join("无扩展名");
+        std::fs::write(&bare, "x").unwrap();
+        let r = within(60, "open file without extension", move || {
+            open_with(&bare, false)
+        });
+        eprintln!("no extension: {r:?}");
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", "OpenWith.exe", "/F"])
+            .output();
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -3,8 +3,8 @@
 //! native context menu.
 
 use crate::{
-    Drive, KnownFolder, KnownFolderKind, MenuAction, RgbaImage, copy_tree, free_copy_name,
-    is_within,
+    Drive, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, RgbaImage, classify_target,
+    copy_tree, free_copy_name, is_within,
 };
 use std::io;
 use std::path::{Path, PathBuf};
@@ -65,6 +65,36 @@ pub fn context_menu(_hwnd: isize, _paths: &[PathBuf], _pos: (i32, i32)) -> MenuA
 
 pub fn background_menu(_hwnd: isize, _folder: &Path, _pos: (i32, i32)) -> MenuAction {
     MenuAction::Dismissed
+}
+
+// ---------- links ----------
+
+pub fn resolve_link(lnk: &Path) -> io::Result<LinkTarget> {
+    let meta = std::fs::symlink_metadata(lnk)?;
+    if !meta.file_type().is_symlink() {
+        return Ok(LinkTarget::Other);
+    }
+    let raw = std::fs::read_link(lnk)?;
+    let target = match lnk.parent() {
+        Some(dir) if raw.is_relative() => dir.join(&raw),
+        _ => raw,
+    };
+    Ok(classify_target(&target.to_string_lossy()))
+}
+
+pub fn create_link(lnk: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, lnk)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (lnk, target);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "links are not supported here",
+        ))
+    }
 }
 
 // ---------- trash ----------
@@ -413,6 +443,31 @@ mod tests {
         );
         assert_eq!(parse_user_dir(text, "XDG_PICTURES_DIR", home), None);
         assert_eq!(parse_user_dir(text, "XDG_DOCUMENTS_DIR", home), None);
+    }
+
+    #[test]
+    fn symlinks_resolve() {
+        let d = scratch("links");
+        std::fs::create_dir(d.join("dir")).unwrap();
+        std::fs::write(d.join("f.txt"), "x").unwrap();
+        create_link(&d.join("to_dir"), &d.join("dir")).unwrap();
+        create_link(&d.join("to_file"), Path::new("f.txt")).unwrap(); // relative
+        create_link(&d.join("to_none"), &d.join("gone")).unwrap();
+        assert_eq!(
+            resolve_link(&d.join("to_dir")).unwrap(),
+            LinkTarget::Folder(d.join("dir"))
+        );
+        assert_eq!(
+            resolve_link(&d.join("to_file")).unwrap(),
+            LinkTarget::File(d.join("f.txt"))
+        );
+        assert_eq!(
+            resolve_link(&d.join("to_none")).unwrap(),
+            LinkTarget::Missing(d.join("gone"))
+        );
+        assert_eq!(resolve_link(&d.join("f.txt")).unwrap(), LinkTarget::Other);
+        assert!(resolve_link(&d.join("nothing")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

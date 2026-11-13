@@ -18,6 +18,13 @@
 //! - `file_icon` is cached and cheap after the first call per extension; it
 //!   is safe from any thread.
 
+// Platform code runs on worker threads and inside window procedures: a panic
+// there aborts the app, so failures are values, never unwraps.
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)
+)]
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +65,20 @@ pub struct KnownFolder {
     pub path: PathBuf,
 }
 
+/// Where a shortcut (.lnk, or a symlink elsewhere) points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An existing folder (local or UNC).
+    Folder(PathBuf),
+    /// An existing file.
+    File(PathBuf),
+    /// A non-empty target path that does not exist (or cannot be reached).
+    Missing(PathBuf),
+    /// No file system target: an item-ID-only shortcut (Control Panel,
+    /// `shell:` locations, ...).
+    Other,
+}
+
 /// What the user did in a native context menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuAction {
@@ -76,6 +97,22 @@ pub enum MenuAction {
 /// files without an association get the "Open with" dialog).
 pub fn open_with_system(path: &Path) -> io::Result<()> {
     imp::open_with_system(path)
+}
+
+/// Reads where a shortcut points without resolving it: no link tracking, no
+/// search, no UI, so it is safe on any thread and never re-enters the app.
+/// On Windows `.lnk` files (env vars expanded); `Err` when the file is not a
+/// shortcut. Elsewhere symlinks; any other file gives `Other`.
+/// Checking whether the target exists may wait on the network for a UNC
+/// target: call it from a background thread.
+pub fn resolve_link(lnk: &Path) -> io::Result<LinkTarget> {
+    imp::resolve_link(lnk)
+}
+
+/// Writes a shortcut at `lnk` pointing at `target` (a .lnk on Windows, a
+/// symlink elsewhere).
+pub fn create_link(lnk: &Path, target: &Path) -> io::Result<()> {
+    imp::create_link(lnk, target)
 }
 
 /// Shows the file in the system file manager, selected.
@@ -259,6 +296,19 @@ pub fn check_name(name: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Folder / File / Missing for a target path; Other when it is empty.
+fn classify_target(target: &str) -> LinkTarget {
+    if target.is_empty() {
+        return LinkTarget::Other;
+    }
+    let path = PathBuf::from(target);
+    match std::fs::metadata(&path) {
+        Ok(m) if m.is_dir() => LinkTarget::Folder(path),
+        Ok(_) => LinkTarget::File(path),
+        Err(_) => LinkTarget::Missing(path),
+    }
 }
 
 fn parent_is(p: &Path, dir: &Path) -> bool {
