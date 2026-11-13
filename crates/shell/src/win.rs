@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    ERROR_CANCELLED, ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE,
-    HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, S_OK, SIZE, WPARAM,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA,
+    ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE, HGLOBAL, HWND,
+    LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, S_OK, SIZE, WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -39,11 +40,21 @@ use windows::Win32::System::Diagnostics::Debug::{
 };
 use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CLASSES_ROOT, KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND,
     RRF_RT_ANY, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
+};
+use windows::Win32::System::RestartManager::{
+    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
+    RmStartSession,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, TerminateProcess,
 };
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
@@ -75,12 +86,14 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
-    GetIconInfo, HICON, HMENU, ICONINFO, PostMessageW, RegisterClassExW, SW_SHOWNORMAL,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM,
-    WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NULL, WNDCLASSEXW, WS_POPUP,
+    EnumWindows, GW_OWNER, GetIconInfo, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
+    HICON, HMENU, ICONINFO, IsIconic, IsWindowVisible, PostMessageW, RegisterClassExW, SW_RESTORE,
+    SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenuEx, WINDOW_EX_STYLE, WM_CLOSE, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
+    WM_MENUCHAR, WM_MENUSELECT, WM_NULL, WNDCLASSEXW, WS_POPUP,
 };
 use windows::core::{
-    GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, Ref, implement, w,
+    BOOL, GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, Ref, implement, w,
 };
 
 const CMIC_MASK_UNICODE: u32 = 0x4000;
@@ -1144,6 +1157,224 @@ pub fn restore_from_recycle_bin(
     Ok(original.to_path_buf())
 }
 
+// ---------- who holds a file (Restart Manager) ----------
+
+/// Ends a Restart Manager session on drop.
+struct RmSession(u32);
+
+impl Drop for RmSession {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = RmEndSession(self.0);
+        }
+    }
+}
+
+fn rm_err(code: WIN32_ERROR) -> io::Error {
+    io::Error::from_raw_os_error(code.0 as i32)
+}
+
+pub fn lockers(files: &[PathBuf]) -> io::Result<Vec<crate::Locker>> {
+    let mut handle = 0u32;
+    let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+    let rc = unsafe { RmStartSession(&mut handle, None, PWSTR(key.as_mut_ptr())) };
+    if rc != ERROR_SUCCESS {
+        return Err(rm_err(rc));
+    }
+    let session = RmSession(handle);
+    let names: Vec<HSTRING> = files.iter().map(|f| wide(f)).collect();
+    // RmRegisterResources copies the names; register in batches to keep each call small
+    for chunk in names.chunks(256) {
+        let ptrs: Vec<PCWSTR> = chunk.iter().map(|h| PCWSTR(h.as_ptr())).collect();
+        let rc = unsafe { RmRegisterResources(session.0, Some(&ptrs), None, None) };
+        if rc != ERROR_SUCCESS {
+            return Err(rm_err(rc));
+        }
+    }
+    let mut infos: Vec<RM_PROCESS_INFO> = Vec::new();
+    for _ in 0..5 {
+        let (mut needed, mut count, mut reasons) = (0u32, infos.len() as u32, 0u32);
+        let ptr = if infos.is_empty() {
+            None
+        } else {
+            Some(infos.as_mut_ptr())
+        };
+        let rc = unsafe { RmGetList(session.0, &mut needed, &mut count, ptr, &mut reasons) };
+        if rc == ERROR_SUCCESS {
+            infos.truncate(count as usize);
+            break;
+        }
+        if rc != ERROR_MORE_DATA {
+            return Err(rm_err(rc));
+        }
+        // the list can grow between calls: retry with room to spare
+        infos = vec![RM_PROCESS_INFO::default(); needed as usize + 4];
+    }
+    drop(session);
+    let windows = top_windows();
+    Ok(infos
+        .iter()
+        .map(|i| {
+            let pid = i.Process.dwProcessId;
+            // RM_APP_TYPE values (RmMainWindow = 1 ... RmCritical = 1000)
+            let kind = match i.ApplicationType.0 {
+                1 => crate::AppKind::Window,
+                2 => crate::AppKind::OtherWindow,
+                3 => crate::AppKind::Service,
+                4 => crate::AppKind::Explorer,
+                5 => crate::AppKind::Console,
+                1000 => crate::AppKind::Critical,
+                _ => crate::AppKind::Unknown,
+            };
+            let (exe, can_terminate) = process_info(pid);
+            let mut name = from_wide(&i.strAppName);
+            if name.is_empty() {
+                name = exe
+                    .as_ref()
+                    .and_then(|e| e.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("PID {pid}"));
+            }
+            let service = Some(from_wide(&i.strServiceShortName)).filter(|s| !s.is_empty());
+            crate::Locker {
+                pid,
+                name,
+                kind,
+                hwnd: main_window(&windows, pid).map(|h| h.0 as isize),
+                exe,
+                service,
+                can_terminate,
+            }
+        })
+        .collect())
+}
+
+/// Closes a process handle on drop.
+struct ProcHandle(HANDLE);
+
+impl Drop for ProcHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+/// (program path, may terminate) for `pid`.
+fn process_info(pid: u32) -> (Option<PathBuf>, bool) {
+    let exe = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .ok()
+        .map(ProcHandle)
+        .and_then(|h| {
+            let mut buf = vec![0u16; 1024];
+            let mut n = buf.len() as u32;
+            unsafe {
+                QueryFullProcessImageNameW(h.0, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut n)
+            }
+            .ok()?;
+            Some(PathBuf::from(String::from_utf16_lossy(
+                buf.get(..n as usize)?,
+            )))
+        });
+    let can_terminate = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) }
+        .ok()
+        .map(ProcHandle)
+        .is_some();
+    (exe, can_terminate)
+}
+
+/// Visible, unowned top-level windows as (hwnd, pid, has title).
+fn top_windows() -> Vec<(HWND, u32, bool)> {
+    unsafe extern "system" fn each(hwnd: HWND, lp: LPARAM) -> BOOL {
+        // SAFETY: lp is the &mut Vec passed to EnumWindows below, alive for the call
+        let out = unsafe { &mut *(lp.0 as *mut Vec<(HWND, u32, bool)>) };
+        unsafe {
+            if IsWindowVisible(hwnd).as_bool() && GetWindow(hwnd, GW_OWNER).is_err() {
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                out.push((hwnd, pid, GetWindowTextLengthW(hwnd) > 0));
+            }
+        }
+        BOOL(1)
+    }
+    let mut out: Vec<(HWND, u32, bool)> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut out as *mut _ as isize));
+    }
+    out
+}
+
+/// The window to show for `pid`: the first titled one, else any.
+fn main_window(windows: &[(HWND, u32, bool)], pid: u32) -> Option<HWND> {
+    let mine = || windows.iter().filter(move |w| w.1 == pid);
+    mine().find(|w| w.2).or_else(|| mine().next()).map(|w| w.0)
+}
+
+fn no_window(pid: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("process {pid} has no window"),
+    )
+}
+
+pub fn activate_process_window(pid: u32) -> io::Result<()> {
+    let hwnd = main_window(&top_windows(), pid).ok_or_else(|| no_window(pid))?;
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        if !SetForegroundWindow(hwnd).as_bool() {
+            return Err(io::Error::other(format!(
+                "Windows did not let process {pid} come to the front"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub fn close_process(pid: u32) -> io::Result<()> {
+    let windows: Vec<HWND> = top_windows()
+        .into_iter()
+        .filter(|w| w.1 == pid)
+        .map(|w| w.0)
+        .collect();
+    if windows.is_empty() {
+        return Err(no_window(pid));
+    }
+    for hwnd in windows {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+    Ok(())
+}
+
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    let h = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) }.map_err(|e| {
+        if e.code() == ERROR_ACCESS_DENIED.to_hresult() {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("no rights to end process {pid}"),
+            )
+        } else if e.code() == ERROR_INVALID_PARAMETER.to_hresult() {
+            io::Error::new(io::ErrorKind::NotFound, format!("no process {pid}"))
+        } else {
+            win_err(e)
+        }
+    })?;
+    let h = ProcHandle(h);
+    unsafe { TerminateProcess(h.0, 1) }.map_err(|e| {
+        if e.code() == ERROR_ACCESS_DENIED.to_hresult() {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("no rights to end process {pid}"),
+            )
+        } else {
+            win_err(e)
+        }
+    })
+}
+
 // ---------- drives and known folders ----------
 
 const DRIVE_REMOTE: u32 = 4;
@@ -1323,6 +1554,66 @@ pub fn clipboard_get_files() -> Option<(Vec<PathBuf>, bool)> {
             }
         }
         (!paths.is_empty()).then_some((paths, cut))
+    }
+}
+
+/// The bytes of clipboard format `fmt` (the clipboard must be open).
+unsafe fn clipboard_bytes(fmt: u32) -> Option<Vec<u8>> {
+    unsafe {
+        let h = GetClipboardData(fmt).ok()?;
+        let g = HGLOBAL(h.0);
+        let size = GlobalSize(g);
+        let p = GlobalLock(g) as *const u8;
+        if p.is_null() {
+            return None;
+        }
+        let out = std::slice::from_raw_parts(p, size).to_vec();
+        let _ = GlobalUnlock(g);
+        Some(out)
+    }
+}
+
+const CF_DIB: u32 = 8;
+const CF_UNICODETEXT: u32 = 13;
+const CF_DIBV5: u32 = 17;
+
+pub fn clipboard_image() -> Option<RgbaImage> {
+    unsafe {
+        let png = RegisterClipboardFormatW(w!("PNG"));
+        let fmts = [png, CF_DIBV5, CF_DIB];
+        if !fmts
+            .iter()
+            .any(|&f| f != 0 && IsClipboardFormatAvailable(f).is_ok())
+        {
+            return None;
+        }
+        open_clipboard().ok()?;
+        let _guard = ClipboardGuard;
+        if png != 0
+            && let Some(img) = clipboard_bytes(png)
+                .and_then(|b| image::load_from_memory_with_format(&b, image::ImageFormat::Png).ok())
+        {
+            return Some(img.into_rgba8());
+        }
+        [CF_DIBV5, CF_DIB]
+            .into_iter()
+            .find_map(|f| clipboard_bytes(f).and_then(|b| crate::decode_dib(&b)))
+    }
+}
+
+pub fn clipboard_text() -> Option<String> {
+    unsafe {
+        IsClipboardFormatAvailable(CF_UNICODETEXT).ok()?;
+        open_clipboard().ok()?;
+        let _guard = ClipboardGuard;
+        let b = clipboard_bytes(CF_UNICODETEXT)?;
+        let units: Vec<u16> = b
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        Some(from_wide(&units)).filter(|t| !t.is_empty())
     }
 }
 
@@ -2170,6 +2461,109 @@ mod tests {
             recycle_info_path(Path::new(r"C:\$Recycle.Bin\S-1\$RAB12.txt")),
             Some(PathBuf::from(r"C:\$Recycle.Bin\S-1\$IAB12.txt"))
         );
+    }
+
+    #[test]
+    fn processes_close_and_terminate() {
+        use std::os::windows::process::CommandExt;
+        // a windowless console child: no window to close or show, but it can be ended
+        let mut child = std::process::Command::new("PING.EXE")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (exe, can) = process_info(pid);
+        println!("ping: exe {exe:?}, can_terminate {can}");
+        assert!(can);
+        assert!(
+            exe.unwrap()
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with("ping.exe")
+        );
+        assert_eq!(
+            crate::close_process(pid).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            crate::activate_process_window(pid).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        crate::terminate_process(pid).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(1));
+        // the System process: no rights (or, unelevated, not even visible)
+        let e = crate::terminate_process(4).unwrap_err();
+        println!("terminate System -> {e}");
+        assert!(matches!(
+            e.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+        ));
+        assert!(!process_info(4).1);
+        // top-level windows enumerate without trouble
+        println!("visible top-level windows: {}", top_windows().len());
+    }
+
+    /// Puts `data` on the clipboard as format `fmt` (test helper).
+    fn put_clipboard(items: &[(u32, &[u8])]) -> bool {
+        unsafe {
+            if open_clipboard().is_err() {
+                return false;
+            }
+            let _guard = ClipboardGuard;
+            let _ = EmptyClipboard();
+            for (fmt, data) in items {
+                let g = GlobalAlloc(GMEM_MOVEABLE, data.len()).unwrap();
+                let p = GlobalLock(g) as *mut u8;
+                std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
+                let _ = GlobalUnlock(g);
+                SetClipboardData(*fmt, Some(HANDLE(g.0))).unwrap();
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn clipboard_image_and_text() {
+        // a 2x1 top-down 32-bpp DIB with no alpha: red, green
+        let mut dib = Vec::new();
+        dib.extend(40u32.to_le_bytes());
+        dib.extend(2i32.to_le_bytes());
+        dib.extend((-1i32).to_le_bytes());
+        dib.extend(1u16.to_le_bytes());
+        dib.extend(32u16.to_le_bytes());
+        dib.resize(40, 0);
+        dib.extend([0, 0, 255, 0, 0, 255, 0, 0]);
+        if !put_clipboard(&[(CF_DIB, &dib)]) {
+            println!("clipboard busy on this runner: skipped");
+            return;
+        }
+        let img = crate::clipboard_image().expect("DIB on the clipboard");
+        assert_eq!(img.dimensions(), (2, 1));
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255]);
+        assert_eq!(crate::clipboard_text(), None);
+        // PNG wins over the DIB
+        let mut png = Vec::new();
+        let src = RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 100]));
+        src.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let png_fmt = unsafe { RegisterClipboardFormatW(w!("PNG")) };
+        assert!(put_clipboard(&[(CF_DIB, &dib), (png_fmt, &png)]));
+        assert_eq!(crate::clipboard_image().unwrap(), src);
+        // text
+        let text: Vec<u8> = "截图 hello\r\n"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(put_clipboard(&[(CF_UNICODETEXT, &text)]));
+        assert_eq!(crate::clipboard_text().as_deref(), Some("截图 hello\r\n"));
+        assert_eq!(crate::clipboard_image(), None);
+        assert!(put_clipboard(&[]));
+        assert_eq!(crate::clipboard_text(), None);
     }
 
     #[test]

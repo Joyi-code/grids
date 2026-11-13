@@ -356,6 +356,292 @@ fn nearest_deleted<T>(
         .map(|(t, _)| t)
 }
 
+/// What kind of program holds a file (Restart Manager's RM_APP_TYPE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppKind {
+    /// A program with a main window.
+    Window,
+    /// A program with windows, none of them its main one.
+    OtherWindow,
+    /// A Windows service.
+    Service,
+    /// Windows Explorer.
+    Explorer,
+    /// A console program.
+    Console,
+    /// A process Windows needs (closing it would restart / crash Windows).
+    Critical,
+    /// Anything else (or off Windows).
+    Unknown,
+}
+
+/// A process that has a file open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Locker {
+    pub pid: u32,
+    /// Friendly name ("Microsoft Word"), else the program's file name.
+    pub name: String,
+    pub kind: AppKind,
+    /// Its main top-level window (HWND), when it has a visible one.
+    pub hwnd: Option<isize>,
+    /// Full path of the program, when Grids may query it (for its icon).
+    pub exe: Option<PathBuf>,
+    /// Service short name for [`AppKind::Service`].
+    pub service: Option<String>,
+    /// Grids could open it for termination. `false`: it runs elevated or as
+    /// another user / the system; the UI should say administrator rights
+    /// are needed and offer no end-process button.
+    pub can_terminate: bool,
+}
+
+/// Result of [`lockers`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lockers {
+    pub list: Vec<Locker>,
+    /// A folder held more than [`LOCKERS_MAX_FILES`] files; the rest were
+    /// not checked.
+    pub truncated: bool,
+}
+
+/// Files of a folder checked by [`lockers`] at most.
+pub const LOCKERS_MAX_FILES: usize = 2000;
+
+/// Which processes have any of `paths` open (Restart Manager: RmStartSession,
+/// RmRegisterResources, RmGetList). A folder is checked through the files
+/// inside it, recursively, up to [`LOCKERS_MAX_FILES`]. Grids itself is
+/// listed too when it holds one (`pid == std::process::id()`). A single file takes a few milliseconds; folders can take
+/// longer: call from a background thread. Linux reads `/proc/*/fd`; other
+/// platforms return an empty list.
+pub fn lockers(paths: &[PathBuf]) -> io::Result<Lockers> {
+    let (files, truncated) = lock_candidates(paths, LOCKERS_MAX_FILES);
+    if files.is_empty() {
+        return Ok(Lockers {
+            list: Vec::new(),
+            truncated,
+        });
+    }
+    let mut list = imp::lockers(&files)?;
+    list.sort_by_key(|l| l.pid);
+    list.dedup_by_key(|l| l.pid);
+    Ok(Lockers { list, truncated })
+}
+
+/// Files to check: `paths` themselves, folders expanded to the files under
+/// them (depth first), at most `max`; `true` when some were left out.
+fn lock_candidates(paths: &[PathBuf], max: usize) -> (Vec<PathBuf>, bool) {
+    let mut out = Vec::new();
+    let mut stack: Vec<PathBuf> = paths.iter().rev().cloned().collect();
+    while let Some(p) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&p) {
+                let mut kids: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+                kids.sort();
+                stack.extend(kids.into_iter().rev());
+            }
+        } else {
+            if out.len() >= max {
+                return (out, true);
+            }
+            out.push(p);
+        }
+    }
+    (out, false)
+}
+
+/// Brings `pid`'s main window to the front, restoring it when minimised.
+/// `NotFound` when it has no visible top-level window. UI thread is fine.
+pub fn activate_process_window(pid: u32) -> io::Result<()> {
+    imp::activate_process_window(pid)
+}
+
+/// Asks `pid` to close: WM_CLOSE to its visible top-level windows, so it can
+/// offer to save. Returns at once; poll [`lockers`] to see whether it let
+/// go. `NotFound` when it has no window (console programs, services).
+pub fn close_process(pid: u32) -> io::Result<()> {
+    imp::close_process(pid)
+}
+
+/// Ends `pid` at once (TerminateProcess); unsaved work is lost.
+/// `PermissionDenied` when Grids lacks the rights (elevated / system
+/// process); `InvalidInput` for Grids itself.
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    if pid == std::process::id() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to end Grids itself",
+        ));
+    }
+    imp::terminate_process(pid)
+}
+
+/// The image on the clipboard: the registered "PNG" format first (browsers,
+/// Office, Snipping Tool put it there with alpha), else CF_DIBV5, else
+/// CF_DIB (BI_RGB / BI_BITFIELDS, 1-32 bpp, bottom-up or top-down).
+/// `None` when there is none or it can't be read; always `None` off
+/// Windows. Opens the clipboard briefly: any thread.
+pub fn clipboard_image() -> Option<RgbaImage> {
+    imp::clipboard_image()
+}
+
+/// Text on the clipboard (CF_UNICODETEXT), `None` when there is none or it
+/// is empty. Always `None` off Windows.
+pub fn clipboard_text() -> Option<String> {
+    imp::clipboard_text()
+}
+
+/// Largest clipboard image accepted (pixels), so a bogus header can't make
+/// us allocate gigabytes.
+#[cfg_attr(not(windows), allow(dead_code))]
+const MAX_CLIP_PIXELS: u64 = 100_000_000;
+
+/// Decodes a packed DIB (BITMAPINFOHEADER / V4 / V5 + optional masks +
+/// palette + pixels), as CF_DIB and CF_DIBV5 hold it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decode_dib(b: &[u8]) -> Option<RgbaImage> {
+    let u32_at =
+        |i: usize| -> Option<u32> { Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?)) };
+    let u16_at =
+        |i: usize| -> Option<u16> { Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?)) };
+    let header = u32_at(0)? as usize;
+    if header < 40 {
+        return None;
+    }
+    let width = u32_at(4)? as i32;
+    let height = u32_at(8)? as i32;
+    let bpp = u16_at(14)?;
+    let compression = u32_at(16)?;
+    let clr_used = u32_at(32)? as usize;
+    if width <= 0 || height == 0 || height == i32::MIN {
+        return None;
+    }
+    let (w, h) = (width as u32, height.unsigned_abs());
+    if u64::from(w) * u64::from(h) > MAX_CLIP_PIXELS {
+        return None;
+    }
+    let top_down = height < 0;
+    const BI_RGB: u32 = 0;
+    const BI_BITFIELDS: u32 = 3;
+    const BI_ALPHABITFIELDS: u32 = 6;
+    let mut offset = header;
+    // channel masks (r, g, b, a)
+    let masks = match compression {
+        BI_RGB => match bpp {
+            16 => Some((0x7c00, 0x03e0, 0x001f, 0)),
+            32 => Some((0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000)),
+            _ => None,
+        },
+        BI_BITFIELDS | BI_ALPHABITFIELDS => {
+            if bpp != 16 && bpp != 32 {
+                return None;
+            }
+            let has_alpha_mask = compression == BI_ALPHABITFIELDS || header >= 56;
+            let (base, after) = if header == 40 {
+                (
+                    40,
+                    if compression == BI_ALPHABITFIELDS {
+                        16
+                    } else {
+                        12
+                    },
+                )
+            } else {
+                (40, 0)
+            };
+            offset += after;
+            let a = if has_alpha_mask {
+                u32_at(base + 12).unwrap_or(0)
+            } else {
+                0
+            };
+            Some((u32_at(base)?, u32_at(base + 4)?, u32_at(base + 8)?, a))
+        }
+        _ => return None, // RLE, JPEG, PNG inside a DIB: not seen on the clipboard in practice
+    };
+    let palette: Vec<[u8; 4]> = if bpp <= 8 {
+        let n = if clr_used == 0 {
+            1usize << bpp
+        } else {
+            clr_used.min(256)
+        };
+        let pal = b.get(offset..offset + n * 4)?;
+        offset += n * 4;
+        pal.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| [c[2], c[1], c[0], 255])
+            .collect()
+    } else {
+        // BI_RGB with 16-32 bpp may still carry a (useless) colour table
+        offset += clr_used.min(256) * 4;
+        Vec::new()
+    };
+    let stride = (w as usize * bpp as usize).div_ceil(32) * 4;
+    let need = stride * h as usize;
+    let mut pixels = b.get(offset..)?;
+    if pixels.len() < need {
+        return None;
+    }
+    // some writers repeat the three masks after a V4/V5 header
+    if header > 40 && compression == BI_BITFIELDS && pixels.len() - need == 12 {
+        pixels = pixels.get(12..)?;
+    }
+    let channel = |v: u32, mask: u32| -> u8 {
+        if mask == 0 {
+            return 0;
+        }
+        let shift = mask.trailing_zeros();
+        let max = mask >> shift;
+        let x = (v & mask) >> shift;
+        ((u64::from(x) * 255 + u64::from(max) / 2) / u64::from(max)) as u8
+    };
+    let mut img = RgbaImage::new(w, h);
+    let mut any_alpha = false;
+    for y in 0..h {
+        let src_row = if top_down { y } else { h - 1 - y } as usize;
+        let row = pixels.get(src_row * stride..src_row * stride + stride)?;
+        for x in 0..w {
+            let xi = x as usize;
+            let px = match bpp {
+                1 | 4 | 8 => {
+                    let bit = xi * bpp as usize;
+                    let byte = *row.get(bit / 8)?;
+                    let idx = (byte >> (8 - bpp as usize - bit % 8)) & ((1u16 << bpp) - 1) as u8;
+                    palette.get(idx as usize).copied().unwrap_or([0, 0, 0, 255])
+                }
+                24 => {
+                    let p = row.get(xi * 3..xi * 3 + 3)?;
+                    [*p.get(2)?, *p.get(1)?, *p.first()?, 255]
+                }
+                16 | 32 => {
+                    let (r, g, bl, a) = masks?;
+                    let v = if bpp == 16 {
+                        u32::from(u16::from_le_bytes(
+                            row.get(xi * 2..xi * 2 + 2)?.try_into().ok()?,
+                        ))
+                    } else {
+                        u32::from_le_bytes(row.get(xi * 4..xi * 4 + 4)?.try_into().ok()?)
+                    };
+                    let alpha = if a == 0 { 255 } else { channel(v, a) };
+                    any_alpha |= a != 0 && alpha != 0;
+                    [channel(v, r), channel(v, g), channel(v, bl), alpha]
+                }
+                _ => return None,
+            };
+            img.put_pixel(x, y, image::Rgba(px));
+        }
+    }
+    // 32 bpp with an all-zero alpha channel means "no alpha" (most writers)
+    if bpp == 32 && !any_alpha {
+        for p in img.pixels_mut() {
+            p.0[3] = 255;
+        }
+    }
+    Some(img)
+}
+
 /// Programs recommended for opening `path` (SHAssocEnumHandlers,
 /// ASSOC_FILTER_RECOMMENDED), the current default first, de-duplicated.
 /// Empty on failure and off Windows. Reads the registry and program icons:
@@ -684,6 +970,171 @@ fn copy_tree(src: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A BITMAPINFOHEADER-family header of `size` bytes.
+    fn dib_header(size: u32, w: i32, h: i32, bpp: u16, comp: u32, clr_used: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend(size.to_le_bytes());
+        v.extend(w.to_le_bytes());
+        v.extend(h.to_le_bytes());
+        v.extend(1u16.to_le_bytes());
+        v.extend(bpp.to_le_bytes());
+        v.extend(comp.to_le_bytes());
+        v.extend(0u32.to_le_bytes()); // size image
+        v.extend([0u8; 8]); // ppm
+        v.extend(clr_used.to_le_bytes());
+        v.extend(0u32.to_le_bytes()); // important
+        v.resize(size as usize, 0);
+        v
+    }
+
+    #[test]
+    fn dib_24bpp_bottom_up_with_padding() {
+        let mut b = dib_header(40, 2, 2, 24, 0, 0);
+        // bottom row first: blue, green (+2 pad); then top row: red, white (+2 pad)
+        b.extend([255, 0, 0, 0, 255, 0, 0, 0]);
+        b.extend([0, 0, 255, 255, 255, 255, 0, 0]);
+        let img = decode_dib(&b).unwrap();
+        assert_eq!(img.dimensions(), (2, 2));
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [255, 255, 255, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [0, 0, 255, 255]);
+        assert_eq!(img.get_pixel(1, 1).0, [0, 255, 0, 255]);
+        b.truncate(b.len() - 1);
+        assert!(decode_dib(&b).is_none());
+    }
+
+    #[test]
+    fn dib_32bpp_alpha_rules() {
+        // BI_RGB, top-down, alpha all zero: opaque
+        let mut b = dib_header(40, 1, -2, 32, 0, 0);
+        b.extend([10, 20, 30, 0, 40, 50, 60, 0]);
+        let img = decode_dib(&b).unwrap();
+        assert_eq!(img.get_pixel(0, 0).0, [30, 20, 10, 255]);
+        assert_eq!(img.get_pixel(0, 1).0, [60, 50, 40, 255]);
+        // V5 + BI_BITFIELDS with an alpha mask: alpha kept
+        let mut b = dib_header(124, 1, 1, 32, 3, 0);
+        b[40..44].copy_from_slice(&0x00ff_0000u32.to_le_bytes());
+        b[44..48].copy_from_slice(&0x0000_ff00u32.to_le_bytes());
+        b[48..52].copy_from_slice(&0x0000_00ffu32.to_le_bytes());
+        b[52..56].copy_from_slice(&0xff00_0000u32.to_le_bytes());
+        b.extend([1, 2, 3, 128]);
+        assert_eq!(decode_dib(&b).unwrap().get_pixel(0, 0).0, [3, 2, 1, 128]);
+        // the same with the masks repeated after the header
+        let mut r = b[..124].to_vec();
+        r.extend(0x00ff_0000u32.to_le_bytes());
+        r.extend(0x0000_ff00u32.to_le_bytes());
+        r.extend(0x0000_00ffu32.to_le_bytes());
+        r.extend([1, 2, 3, 128]);
+        assert_eq!(decode_dib(&r).unwrap().get_pixel(0, 0).0, [3, 2, 1, 128]);
+        // RGBA order masks (BI_BITFIELDS in a plain 40-byte header: masks follow it)
+        let mut b = dib_header(40, 1, 1, 32, 3, 0);
+        b.extend(0x0000_00ffu32.to_le_bytes());
+        b.extend(0x0000_ff00u32.to_le_bytes());
+        b.extend(0x00ff_0000u32.to_le_bytes());
+        b.extend([1, 2, 3, 99]);
+        assert_eq!(decode_dib(&b).unwrap().get_pixel(0, 0).0, [1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn dib_16bpp_and_palettes() {
+        // 565 bitfields: pure red, pure green
+        let mut b = dib_header(40, 2, 1, 16, 3, 0);
+        b.extend(0xf800u32.to_le_bytes());
+        b.extend(0x07e0u32.to_le_bytes());
+        b.extend(0x001fu32.to_le_bytes());
+        b.extend(0xf800u16.to_le_bytes());
+        b.extend(0x07e0u16.to_le_bytes());
+        let img = decode_dib(&b).unwrap();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 255, 0, 255]);
+        // 555 BI_RGB default: blue
+        let mut b = dib_header(40, 1, 1, 16, 0, 0);
+        b.extend([0x1f, 0x00, 0, 0]);
+        assert_eq!(decode_dib(&b).unwrap().get_pixel(0, 0).0, [0, 0, 255, 255]);
+        // 8 bpp, 2-entry palette
+        let mut b = dib_header(40, 3, 1, 8, 0, 2);
+        b.extend([0, 0, 0, 0, 0, 0, 255, 0]); // black, red (BGRx)
+        b.extend([1, 0, 1, 0]);
+        let img = decode_dib(&b).unwrap();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 0, 0, 255]);
+        // 1 bpp, default 2-entry palette: 0b1010_0000
+        let mut b = dib_header(40, 3, 1, 1, 0, 0);
+        b.extend([0, 0, 0, 0, 255, 255, 255, 0]);
+        b.extend([0b1010_0000, 0, 0, 0]);
+        let img = decode_dib(&b).unwrap();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        assert_eq!(img.get_pixel(1, 0).0, [0, 0, 0, 255]);
+        assert_eq!(img.get_pixel(2, 0).0, [255, 255, 255, 255]);
+        // nonsense
+        assert!(decode_dib(&dib_header(40, 0, 1, 24, 0, 0)).is_none());
+        assert!(decode_dib(&dib_header(40, 100_000, 100_000, 24, 0, 0)).is_none());
+        assert!(decode_dib(&dib_header(40, 1, 1, 24, 1, 0)).is_none()); // RLE8
+        assert!(decode_dib(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn lock_candidates_expand_and_cap() {
+        let d = scratch("lockcand");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        for n in ["a", "b", "c"] {
+            std::fs::write(d.join(n), n).unwrap();
+        }
+        std::fs::write(d.join("sub").join("z"), "z").unwrap();
+        let (all, cut) = lock_candidates(std::slice::from_ref(&d), 10);
+        assert_eq!(all.len(), 4);
+        assert!(!cut);
+        let (some, cut) = lock_candidates(std::slice::from_ref(&d), 2);
+        assert_eq!(some, vec![d.join("a"), d.join("b")]);
+        assert!(cut);
+        let (none, cut) = lock_candidates(&[d.join("missing")], 2);
+        assert!(none.is_empty() && !cut);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn lockers_find_this_process() {
+        let d = scratch("lockers");
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("held.txt");
+        std::fs::write(&f, "x").unwrap();
+        std::fs::write(d.join("free.txt"), "y").unwrap();
+        let me = std::process::id();
+        assert!(
+            !lockers(&[d.join("free.txt")])
+                .unwrap()
+                .list
+                .iter()
+                .any(|l| l.pid == me)
+        );
+        let held = std::fs::File::open(&f).unwrap();
+        let by_file = lockers(std::slice::from_ref(&f)).unwrap();
+        println!("lockers(file) = {by_file:?}");
+        let mine = by_file
+            .list
+            .iter()
+            .find(|l| l.pid == me)
+            .expect("this process holds the file");
+        assert!(!mine.name.is_empty());
+        assert!(mine.can_terminate);
+        let by_dir = lockers(std::slice::from_ref(&d)).unwrap();
+        assert!(by_dir.list.iter().any(|l| l.pid == me) && !by_dir.truncated);
+        drop(held);
+        assert!(
+            !lockers(std::slice::from_ref(&f))
+                .unwrap()
+                .list
+                .iter()
+                .any(|l| l.pid == me)
+        );
+        assert!(matches!(
+            terminate_process(me).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn nearest_deleted_picks_closest_within_10s() {

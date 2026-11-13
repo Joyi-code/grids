@@ -393,6 +393,93 @@ pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
     Ok(done)
 }
 
+pub fn clipboard_image() -> Option<RgbaImage> {
+    None
+}
+
+pub fn clipboard_text() -> Option<String> {
+    None
+}
+
+// ---------- who holds a file ----------
+
+/// Linux: processes with one of `files` among their open fds (`/proc/*/fd`);
+/// only the user's own processes are readable. Elsewhere nothing.
+pub fn lockers(files: &[PathBuf]) -> io::Result<Vec<crate::Locker>> {
+    let mut out = Vec::new();
+    if !cfg!(target_os = "linux") {
+        return Ok(out);
+    }
+    let wanted: std::collections::HashSet<PathBuf> = files
+        .iter()
+        .filter_map(|f| std::fs::canonicalize(f).ok())
+        .collect();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Ok(out);
+    };
+    for p in procs.flatten() {
+        let Some(pid) = p.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+            continue;
+        };
+        let holds = fds
+            .flatten()
+            .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+            .any(|t| wanted.contains(&t));
+        if holds {
+            let exe = std::fs::read_link(p.path().join("exe")).ok();
+            let name = std::fs::read_to_string(p.path().join("comm"))
+                .map(|c| c.trim().to_owned())
+                .unwrap_or_else(|_| format!("PID {pid}"));
+            out.push(crate::Locker {
+                pid,
+                name,
+                kind: crate::AppKind::Unknown,
+                hwnd: None,
+                exe,
+                service: None,
+                can_terminate: true,
+            });
+        }
+    }
+    Ok(out)
+}
+
+pub fn activate_process_window(_pid: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "switching to another program's window is Windows-only",
+    ))
+}
+
+fn kill(pid: u32, signal: &str) -> io::Result<()> {
+    let st = std::process::Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("could not signal process {pid}"),
+        ))
+    }
+}
+
+/// SIGTERM: the polite close.
+pub fn close_process(pid: u32) -> io::Result<()> {
+    kill(pid, "-TERM")
+}
+
+pub fn terminate_process(pid: u32) -> io::Result<()> {
+    kill(pid, "-KILL")
+}
+
 pub fn drives() -> Vec<Drive> {
     let mut out = vec![Drive {
         path: PathBuf::from("/"),
