@@ -62,6 +62,7 @@ pub enum Cmd {
     NewFile(String),
     Terminal,
     CopyFolderPath,
+    View(grids_core::ViewMode),
 }
 
 #[derive(Clone)]

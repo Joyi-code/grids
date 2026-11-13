@@ -8,6 +8,7 @@ mod menu;
 mod pane;
 mod state;
 mod theme;
+mod thumbs;
 mod ui;
 mod workspace;
 

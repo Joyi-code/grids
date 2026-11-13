@@ -17,7 +17,7 @@ static FILES: &[(&str, &[u8])] = icons![
     "house", "image", "layers", "layout-grid", "maximize-2", "minimize-2", "minus", "monitor", "moon", "panel-left",
     "panel-left-close", "panel-left-open", "pencil", "plus", "presentation", "refresh-cw", "save", "scissors", "search", "square", "star",
     "star-fill", "sun", "sun-moon", "trash-2", "x", "star-off", "folder-search", "square-split-horizontal", "link", "info",
-    "terminal",
+    "terminal", "list", "layout-list", "grid-2x2",
 ];
 
 /// The app icon, drawn beside "Grids" in the sidebar (48px, shown at 20).

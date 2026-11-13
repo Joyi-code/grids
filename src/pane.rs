@@ -7,13 +7,15 @@ use crate::input::{InputEvent, TextInput};
 use crate::state::{self, tr};
 use crate::theme::{self, Theme};
 use crate::menu::{Cmd, ContextMenu as MenuView, Glyph, Item, MenuEvent};
+use crate::thumbs;
 use crate::ui::{TipExt, icon, ui_text};
 use futures::StreamExt;
 use gpui::{prelude::FluentBuilder, *};
 use grids_core::format;
 use grids_core::listing::{self, Entry};
 use grids_core::paths;
-use grids_core::session::{Columns, PaneSave};
+use grids_core::session::{Columns, PaneSave, ViewMode};
+use std::collections::HashSet;
 use grids_core::{PaneState, SortKey};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -26,7 +28,8 @@ actions!(
         Open, GoUp, GoBack, GoForward, Rename, Recycle, DeletePermanently, CopyFiles, CutFiles, PasteFiles, Refresh, NewFolder,
         EditAddress, FilterNames, ToggleHidden, SelectAll, CursorUp, CursorDown, PageUp, PageDown, First, Last, SelectUp,
         SelectDown, SelectPageUp, SelectPageDown, SelectFirst, SelectLast, MoveUp, MoveDown, Escape, ContextMenu,
-        CopyPath, Properties
+        CopyPath, Properties, CursorLeft, CursorRight, SelectLeft, SelectRight, ViewHuge, ViewLarge, ViewMedium, ViewList,
+        ViewDetails
     ]
 );
 
@@ -71,6 +74,22 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("menu", ContextMenu, c),
         KeyBinding::new("secondary-shift-c", CopyPath, c),
         KeyBinding::new("alt-enter", Properties, c),
+        KeyBinding::new("left", CursorLeft, c),
+        KeyBinding::new("right", CursorRight, c),
+        KeyBinding::new("shift-left", SelectLeft, c),
+        KeyBinding::new("shift-right", SelectRight, c),
+        // Explorer's view keys: 1 extra large … 4 list (small icons), 5 details.
+        KeyBinding::new("secondary-shift-1", ViewHuge, c),
+        // Shifted digits arrive as symbols (US layout) on Windows and Linux.
+        KeyBinding::new("secondary-!", ViewHuge, c),
+        KeyBinding::new("secondary-shift-2", ViewLarge, c),
+        KeyBinding::new("secondary-@", ViewLarge, c),
+        KeyBinding::new("secondary-shift-3", ViewMedium, c),
+        KeyBinding::new("secondary-#", ViewMedium, c),
+        KeyBinding::new("secondary-shift-4", ViewList, c),
+        KeyBinding::new("secondary-$", ViewList, c),
+        KeyBinding::new("secondary-shift-5", ViewDetails, c),
+        KeyBinding::new("secondary-%", ViewDetails, c),
     ]);
 }
 
@@ -154,6 +173,12 @@ pub struct PaneView {
     pub active: bool,
     pub state: PaneState,
     pub columns: Columns,
+    pub view: ViewMode,
+    /// Items per row in the icon and list views (1 in details), from the
+    /// last layout; the arrow keys and Page Up / Down step by it.
+    grid_cols: usize,
+    /// Ctrl+wheel travel not yet turned into a view step.
+    wheel: Rc<Cell<f32>>,
     pub focus: FocusHandle,
     scroll: UniformListScrollHandle,
     list_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -191,6 +216,9 @@ impl PaneView {
             active: false,
             state,
             columns: save.columns.clone(),
+            view: save.view,
+            grid_cols: 1,
+            wheel: Rc::default(),
             focus,
             scroll: UniformListScrollHandle::new(),
             list_bounds: Rc::default(),
@@ -212,7 +240,7 @@ impl PaneView {
     }
 
     pub fn save(&self) -> PaneSave {
-        PaneSave { path: self.state.path.clone(), sort: self.state.sort, ascending: self.state.ascending, show_hidden: self.state.show_hidden, columns: self.columns.clone() }
+        PaneSave { path: self.state.path.clone(), sort: self.state.sort, ascending: self.state.ascending, show_hidden: self.state.show_hidden, columns: self.columns.clone(), view: self.view }
     }
 
     // ---- loading
@@ -237,7 +265,7 @@ impl PaneView {
                         this.state.set_entries(entries, select.as_deref());
                         let mut jump = select.is_some();
                         if let Some(names) = this.pending_select.take() { this.state.select_names(&names); jump = true }
-                        if let Some(r) = this.state.cursor.filter(|_| jump) { this.scroll.scroll_to_item(r, ScrollStrategy::Center) }
+                        if let Some(r) = this.state.cursor.filter(|_| jump) { this.reveal(r, ScrollStrategy::Center) }
                     }
                     Err(e) => this.state.set_error(error_text(&e, state::en(cx))),
                 }
@@ -348,11 +376,48 @@ impl PaneView {
 
     // ---- keyboard
 
-    fn page(&self) -> isize { ((f32::from(self.list_bounds.get().size.height) / ROW_H).floor() as isize - 1).max(1) }
+    fn page(&self) -> isize {
+        let h = f32::from(self.list_bounds.get().size.height);
+        let row_h = grid_metrics(self.view, f32::from(self.list_bounds.get().size.width)).map_or(ROW_H, |g| g.cell_h);
+        ((h / row_h).floor() as isize - 1).max(1) * self.grid_cols as isize
+    }
+
+    /// Scrolls item `r` into view (its row, in the grid views).
+    fn reveal(&self, r: usize, strategy: ScrollStrategy) {
+        self.scroll.scroll_to_item(r / self.grid_cols.max(1), strategy)
+    }
 
     fn move_cursor(&mut self, delta: isize, to_end: bool, shift: bool, ctrl: bool, cx: &mut Context<Self>) {
         self.state.move_cursor(delta, to_end, shift, ctrl);
-        if let Some(r) = self.state.cursor { self.scroll.scroll_to_item(r, ScrollStrategy::Top) }
+        if let Some(r) = self.state.cursor { self.reveal(r, ScrollStrategy::Top) }
+        cx.notify();
+    }
+
+    /// Up / Down: a whole row of items in the grid views.
+    fn move_rows(&mut self, rows: isize, shift: bool, ctrl: bool, cx: &mut Context<Self>) {
+        let step = rows * self.grid_cols.max(1) as isize;
+        // Not past the ends in a grid: stay in the column, as Explorer does.
+        if self.grid_cols > 1 && let Some(c) = self.state.cursor {
+            let to = c as isize + step;
+            if to < 0 || to >= self.state.len() as isize { return }
+        }
+        self.move_cursor(step, false, shift, ctrl, cx)
+    }
+
+    /// Left / Right: the next item in the grid views; nothing in details.
+    fn move_side(&mut self, delta: isize, shift: bool, cx: &mut Context<Self>) {
+        if self.view == ViewMode::Details { return }
+        self.move_cursor(delta, false, shift, false, cx)
+    }
+
+    pub fn set_view(&mut self, view: ViewMode, cx: &mut Context<Self>) {
+        if self.view == view { return }
+        self.view = view;
+        if let Some(r) = self.state.cursor {
+            self.grid_cols = grid_metrics(view, f32::from(self.list_bounds.get().size.width)).map_or(1, |g| g.cols);
+            self.reveal(r, ScrollStrategy::Center);
+        }
+        cx.emit(PaneEvent::Changed);
         cx.notify();
     }
 
@@ -367,7 +432,7 @@ impl PaneView {
         self.type_buf.1 = Instant::now();
         if let Some(r) = self.state.find_prefix(&self.type_buf.0) {
             self.state.click(Some(r), false, false);
-            self.scroll.scroll_to_item(r, ScrollStrategy::Top);
+            self.reveal(r, ScrollStrategy::Top);
             cx.notify();
         }
         cx.stop_propagation();
@@ -455,7 +520,7 @@ impl PaneView {
     fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(e) = self.state.cursor_entry().cloned().or_else(|| self.state.selection().first().map(|e| (*e).clone())) else { return };
         self.state.select_name(&e.name);
-        if let Some(r) = self.state.cursor { self.scroll.scroll_to_item(r, ScrollStrategy::Top) }
+        if let Some(r) = self.state.cursor { self.reveal(r, ScrollStrategy::Top) }
         let input = cx.new(|cx| {
             let mut t = TextInput::new(&e.name, "", cx);
             let stem = if e.is_dir { e.name.len() } else { e.name.rfind('.').filter(|&i| i > 0).unwrap_or(e.name.len()) };
@@ -637,10 +702,12 @@ impl PaneView {
                 Item::check(t("递增", "Ascending"), st.ascending, "", Cmd::Ascending(true)),
                 Item::check(t("递减", "Descending"), !st.ascending, "", Cmd::Ascending(false)),
             ];
-            let view = vec![
+            let mut view = view_items(self.view, en);
+            view.extend([
+                Item::Sep,
                 Item::sub(t("排序方式", "Sort by"), "arrow-up-down", sort_items),
                 Item::check(t("显示隐藏的项目", "Show hidden items"), st.show_hidden, "Ctrl+H", Cmd::ToggleHidden),
-            ];
+            ]);
             let mut new_items = vec![Item::row(t("文件夹", "Folder"), "folder", "Ctrl+Shift+N", Cmd::NewFolder), Item::Sep];
             for n in state::new_items(cx).iter() {
                 let glyph = n.icon.clone().map_or(Glyph::Icon("file"), Glyph::Image);
@@ -689,6 +756,22 @@ impl PaneView {
                 });
             }).detach();
         }
+        self.menu = Some((menu, sub));
+        cx.notify();
+    }
+
+    /// The view button's menu, under the button.
+    fn view_menu(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let items = view_items(self.view, state::en(cx));
+        let menu = cx.new(|cx| MenuView::new(items, pos, 220., cx));
+        let sub = cx.subscribe_in(&menu, window, move |this, _, ev: &MenuEvent, window, cx| {
+            this.menu = None;
+            window.focus(&this.focus);
+            if let MenuEvent::Pick(cmd) = ev { this.run_cmd(cmd.clone(), None, pos, window, cx) }
+            cx.notify();
+        });
+        let mf = menu.read(cx).focus.clone();
+        window.defer(cx, move |window, _| mf.focus(window));
         self.menu = Some((menu, sub));
         cx.notify();
     }
@@ -749,6 +832,7 @@ impl PaneView {
             Cmd::Ascending(up) => { if self.state.ascending != up { let k = self.state.sort; self.sort_by(k, cx) } }
             Cmd::ToggleHidden => self.toggle_hidden(cx),
             Cmd::Refresh => self.load(None, cx),
+            Cmd::View(v) => self.set_view(v, cx),
             Cmd::NewFolder => self.new_folder(window, cx),
             Cmd::NewFile(ext) => match grids_shell::create_new(&dir, &ext) {
                 Ok(p) => {
@@ -854,6 +938,60 @@ fn filter_hit(name: &str, filter: &str) -> Option<std::ops::Range<usize>> {
 }
 
 /// The date alone (no time) when the column is too narrow for both.
+/// The grid views' geometry for a list `avail` px wide: items per row and
+/// each cell's size, and the picture's edge. None in the details view.
+#[derive(Clone, Copy)]
+struct Grid {
+    cols: usize,
+    cell_w: f32,
+    cell_h: f32,
+    icon: f32,
+}
+
+fn grid_metrics(view: ViewMode, avail: f32) -> Option<Grid> {
+    // (picture edge, narrowest cell, cell height)
+    let (icon, min_w, cell_h) = match view {
+        ViewMode::Details => return None,
+        ViewMode::List => (ICON, 220., ROW_H),
+        ViewMode::Medium => (48., 112., 48. + 58.),
+        ViewMode::Large => (96., 132., 96. + 60.),
+        ViewMode::Huge => (192., 224., 192. + 62.),
+    };
+    let inner = (avail - 2. * ROW_X).max(min_w);
+    let cols = ((inner / min_w).floor() as usize).max(1);
+    Some(Grid { cols, cell_w: inner / cols as f32, cell_h, icon })
+}
+
+fn view_glyph(v: ViewMode) -> &'static str {
+    match v {
+        ViewMode::Details => "layout-list",
+        ViewMode::List => "list",
+        ViewMode::Medium => "layout-grid",
+        ViewMode::Large => "grid-2x2",
+        ViewMode::Huge => "image",
+    }
+}
+
+/// The view choices, as in Explorer's View menu (largest first).
+fn view_items(cur: ViewMode, en: bool) -> Vec<Item> {
+    ViewMode::ALL.iter().enumerate().map(|(i, &v)| {
+        let label = match (v, en) {
+            (ViewMode::Huge, false) => "超大图标",
+            (ViewMode::Large, false) => "大图标",
+            (ViewMode::Medium, false) => "中图标",
+            (ViewMode::List, false) => "列表",
+            (ViewMode::Details, false) => "详细信息",
+            (ViewMode::Huge, true) => "Extra large icons",
+            (ViewMode::Large, true) => "Large icons",
+            (ViewMode::Medium, true) => "Medium icons",
+            (ViewMode::List, true) => "List",
+            (ViewMode::Details, true) => "Details",
+        };
+        const KEYS: [&str; 5] = ["Ctrl+Shift+1", "Ctrl+Shift+2", "Ctrl+Shift+3", "Ctrl+Shift+4", "Ctrl+Shift+5"];
+        Item::check(label, v == cur, KEYS[i], Cmd::View(v))
+    }).collect()
+}
+
 fn short_date(full: String, width: f32) -> String {
     if width >= 124. { return full }
     full.split(' ').next().unwrap_or_default().to_string()
@@ -936,6 +1074,11 @@ impl PaneView {
                     .child(btn("back", "arrow-left", st.can_back()).tip(t("后退", "Back"), Some("Alt+←")).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
                     .child(btn("fwd", "arrow-right", st.can_forward()).tip(t("前进", "Forward"), Some("Alt+→")).on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))))
                     .child(btn("up", "arrow-up", st.can_up()).tip(t("上一级", "Up"), Some("Alt+↑")).on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
+                    .child(btn("view", view_glyph(self.view), true).tip(t("视图", "View"), Some("Ctrl+Shift+1…5")).on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        let at = ev.position();
+                        this.view_menu(point(at.x - px(180.), at.y + px(14.)), window, cx)
+                    })))
                     .child(
                         div().id("fav").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
                             .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
@@ -1002,44 +1145,16 @@ impl PaneView {
         row
     }
 
-    fn render_row(&self, r: usize, widths: [f32; 4], focused: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some(e) = self.state.row(r) else { return div().into_any_element() };
+    /// What every item does with the mouse, in any view: select, open,
+    /// context menu, drag, and folders take drops.
+    fn item_events(&self, el: Stateful<Div>, r: usize, e: &Entry, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let lang = state::lang(cx);
-        let offset = state::shared(cx).utc_offset;
-        let selected = self.state.is_selected(r);
-        let cursor = self.state.cursor == Some(r) && focused;
-        let kind = e.kind();
-        let renaming = self.rename.as_ref().filter(|rn| rn.path == e.path);
-        let sys_icon = state::file_icon(&e.path, e.is_dir, &e.ext, cx);
-        let glyph = match sys_icon {
-            Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
-            None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
-        };
-        let name_cell = div().flex_none().w(px(widths[0])).h_full().pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)).child(glyph).map(|d| match renaming {
-            Some(rn) => d.child(div().flex_1().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone())),
-            None => d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(if e.hidden { Theme::text_caption() } else { Theme::text() }).child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary()))),
-        });
-        let cell = |w: f32, text: String, right: bool| div().flex_none().w(px(w)).px(px(CELL_PAD)).overflow_hidden().whitespace_nowrap().text_ellipsis().when(right, |d| d.flex().justify_end()).child(ui_text(text));
-        let size = if e.is_dir { String::new() } else { format::size(e.size, lang) };
         let path = e.path.clone();
         let is_dir = e.is_dir;
         let drag = if selected { self.state.selected_paths() } else { vec![e.path.clone()] };
         let label: SharedString = if drag.len() > 1 { format!("{} {}", drag.len(), if lang == format::Lang::En { "items" } else { "项" }).into() } else { e.name.clone().into() };
         let payload = DraggedFiles { paths: drag, from: self.state.path.clone(), label };
-        div()
-            .id(("row", r))
-            .h(px(ROW_H))
-            .mx(px(ROW_X))
-            .rounded(px(ROW_R))
-            .flex()
-            .items_center()
-            .text_color(Theme::text_caption())
-            .map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
-            .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
-            .child(name_cell)
-            .when(widths[1] > 0., |d| d.child(cell(widths[1], short_date(format::date(e.modified, offset), widths[1]), false)))
-            .when(widths[2] > 0., |d| d.child(cell(widths[2], format::type_name(e, lang), false)))
-            .when(widths[3] > 0., |d| d.child(cell(widths[3], size, true)))
+        el
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 this.menu = None;
@@ -1071,18 +1186,145 @@ impl PaneView {
             })
             .into_any_element()
     }
+
+    /// One item of the list and icon views: a cell `g.cell_w` wide with the
+    /// picture over (icons) or beside (list) the name.
+    fn render_item(&self, r: usize, g: Grid, focused: bool, scale: f32, keys: &mut HashSet<thumbs::Key>, cx: &mut Context<Self>) -> AnyElement {
+        let Some(e) = self.state.row(r) else { return div().w(px(g.cell_w)).into_any_element() };
+        let selected = self.state.is_selected(r);
+        let cursor = self.state.cursor == Some(r) && focused;
+        let kind = e.kind();
+        let renaming = self.rename.as_ref().filter(|rn| rn.path == e.path);
+        let name_color = if e.hidden { Theme::text_caption() } else { Theme::text() };
+        let hl = |d: Div| -> Div {
+            d.map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
+                .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
+        };
+        let rename_box = |rn: &RenameState| div().w_full().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone());
+        if g.icon <= ICON {
+            // List: small icon and one line of name.
+            let glyph = match state::file_icon(&e.path, e.is_dir, &e.ext, cx) {
+                Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
+                None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
+            };
+            let inner = hl(div().size_full().rounded(px(ROW_R)).pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)))
+                .child(glyph)
+                .child(match renaming {
+                    Some(rn) => rename_box(rn).flex_1().into_any_element(),
+                    None => div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(name_color)
+                        .child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary())).into_any_element(),
+                });
+            let cell = div().id(("row", r)).flex_none().w(px(g.cell_w)).h(px(g.cell_h)).px(px(2.)).child(inner);
+            return self.item_events(cell, r, e, selected, cx);
+        }
+        let edge = ((g.icon * scale).round() as u32).min(256);
+        let key: thumbs::Key = (e.path.clone(), e.modified, edge);
+        let thumb = thumbs::get(&key, cx).flatten();
+        keys.insert(key);
+        let picture = match thumb {
+            Some(image) => img(image).size(px(g.icon)).object_fit(ObjectFit::Contain).into_any_element(),
+            None => div().size(px(g.icon)).flex().items_center().justify_center()
+                .child(icon(theme::kind_icon(kind), (g.icon * 0.72).round(), theme::kind_color(kind))).into_any_element(),
+        };
+        let name = match renaming {
+            Some(rn) => rename_box(rn).into_any_element(),
+            None => {
+                // Two centred lines at most, cut with an ellipsis.
+                let hl: Vec<_> = filter_hit(&e.name, &self.state.filter).map(|r| (r, HighlightStyle { color: Some(Theme::primary()), ..Default::default() })).into_iter().collect();
+                div().w_full().px(px(4.)).text_center().line_clamp(2).text_ellipsis().line_height(px(18.)).text_color(name_color)
+                    .child(StyledText::new(e.name.clone()).with_highlights(hl)).into_any_element()
+            }
+        };
+        let inner = hl(div().size_full().rounded(px(8.)).pt(px(8.)).px(px(4.)).flex().flex_col().items_center().gap(px(6.)))
+            .child(div().flex_none().child(picture))
+            .child(name);
+        let cell = div().id(("row", r)).flex_none().w(px(g.cell_w)).h(px(g.cell_h)).p(px(2.)).child(inner);
+        self.item_events(cell, r, e, selected, cx)
+    }
+
+    fn render_row(&self, r: usize, widths: [f32; 4], focused: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(e) = self.state.row(r) else { return div().into_any_element() };
+        let lang = state::lang(cx);
+        let offset = state::shared(cx).utc_offset;
+        let selected = self.state.is_selected(r);
+        let cursor = self.state.cursor == Some(r) && focused;
+        let kind = e.kind();
+        let renaming = self.rename.as_ref().filter(|rn| rn.path == e.path);
+        let sys_icon = state::file_icon(&e.path, e.is_dir, &e.ext, cx);
+        let glyph = match sys_icon {
+            Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
+            None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
+        };
+        let name_cell = div().flex_none().w(px(widths[0])).h_full().pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)).child(glyph).map(|d| match renaming {
+            Some(rn) => d.child(div().flex_1().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone())),
+            None => d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(if e.hidden { Theme::text_caption() } else { Theme::text() }).child(ui_text(e.name.clone()).hit(filter_hit(&e.name, &self.state.filter), Theme::primary()))),
+        });
+        let cell = |w: f32, text: String, right: bool| div().flex_none().w(px(w)).px(px(CELL_PAD)).overflow_hidden().whitespace_nowrap().text_ellipsis().when(right, |d| d.flex().justify_end()).child(ui_text(text));
+        let size = if e.is_dir { String::new() } else { format::size(e.size, lang) };
+        let row = div()
+            .id(("row", r))
+            .h(px(ROW_H))
+            .mx(px(ROW_X))
+            .rounded(px(ROW_R))
+            .flex()
+            .items_center()
+            .text_color(Theme::text_caption())
+            .map(|d| if selected { d.bg(if focused && self.active { Theme::sidebar_selected() } else { Theme::sidebar_hover() }) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
+            .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
+            .child(name_cell)
+            .when(widths[1] > 0., |d| d.child(cell(widths[1], short_date(format::date(e.modified, offset), widths[1]), false)))
+            .when(widths[2] > 0., |d| d.child(cell(widths[2], format::type_name(e, lang), false)))
+            .when(widths[3] > 0., |d| d.child(cell(widths[3], size, true)));
+        self.item_events(row, r, e, selected, cx)
+            .into_any_element()
+    }
+}
+
+impl PaneView {
+    /// Ctrl+wheel over the list steps the view (up: bigger), caught before
+    /// the list scrolls.
+    fn ctrl_wheel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let acc = self.wheel.clone();
+        canvas(|_, _, _| {}, move |bounds, _, window, _| {
+            window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture || !ev.modifiers.secondary() || !bounds.contains(&ev.position) { return }
+                cx.stop_propagation();
+                let dy = match ev.delta { ScrollDelta::Lines(l) => l.y * 40., ScrollDelta::Pixels(p) => f32::from(p.y) };
+                let a = acc.get() + dy;
+                if a.abs() < 40. { return acc.set(a) }
+                acc.set(0.);
+                let _ = weak.update(cx, |this, cx| { let v = this.view.step(a > 0.); this.set_view(v, cx) });
+            });
+        }).absolute().size_full()
+    }
 }
 
 impl Render for PaneView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let avail = f32::from(self.list_bounds.get().size.width);
-        let widths = self.fit_columns(if avail <= 1. { 600. } else { avail });
+        let avail = if avail <= 1. { 600. } else { avail };
+        let widths = self.fit_columns(avail);
         let n = self.state.len();
         let en = state::en(cx);
-        let _ = window;
-        let list = uniform_list("files", n, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+        let grid = grid_metrics(self.view, avail);
+        self.grid_cols = grid.map_or(1, |g| g.cols);
+        let scale = window.scale_factor();
+        let pane_id = cx.entity_id();
+        let rows = grid.map_or(n, |g| n.div_ceil(g.cols));
+        let list = uniform_list("files", rows, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
             let focused = this.focus.contains_focused(window, cx) || this.menu.is_some() || this.rename.is_some();
-            range.map(|r| this.render_row(r, widths, focused, cx)).collect()
+            let Some(g) = grid else {
+                thumbs::set_visible(pane_id, HashSet::new(), cx);
+                return range.map(|r| this.render_row(r, widths, focused, cx)).collect();
+            };
+            let mut keys = HashSet::new();
+            let out = range.map(|row| {
+                let items = (row * g.cols..((row + 1) * g.cols).min(n)).map(|r| this.render_item(r, g, focused, scale, &mut keys, cx)).collect::<Vec<_>>();
+                div().flex().px(px(ROW_X)).children(items).into_any_element()
+            }).collect();
+            thumbs::set_visible(pane_id, keys, cx);
+            out
         }))
         .track_scroll(self.scroll.clone())
         .size_full()
@@ -1098,6 +1340,7 @@ impl Render for PaneView {
             .min_h_0()
             .pt(px(2.))
             .child(canvas(move |b, _, _| list_bounds.set(b), |_, _, _, _| {}).absolute().size_full())
+            .child(self.ctrl_wheel(cx))
             .child(list)
             .when_some(empty_msg, |d, msg| d.child(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(msg)))
             .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(Theme::drop_target()))
@@ -1112,7 +1355,6 @@ impl Render for PaneView {
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.context_menu(None, ev.position, window, cx)));
 
-        let pane_id = cx.entity_id();
         div()
             .id("pane")
             .key_context("Pane")
@@ -1145,20 +1387,29 @@ impl Render for PaneView {
             .on_action(cx.listener(|this, _: &FilterNames, window, cx| this.start_filter(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| { this.state.select_all(); cx.notify() }))
-            .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-1, false, false, false, cx)))
-            .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(1, false, false, false, cx)))
+            .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_rows(-1, false, false, cx)))
+            .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_rows(1, false, false, cx)))
+            .on_action(cx.listener(|this, _: &CursorLeft, _, cx| this.move_side(-1, false, cx)))
+            .on_action(cx.listener(|this, _: &CursorRight, _, cx| this.move_side(1, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| this.move_side(-1, true, cx)))
+            .on_action(cx.listener(|this, _: &SelectRight, _, cx| this.move_side(1, true, cx)))
+            .on_action(cx.listener(|this, _: &ViewHuge, _, cx| this.set_view(ViewMode::Huge, cx)))
+            .on_action(cx.listener(|this, _: &ViewLarge, _, cx| this.set_view(ViewMode::Large, cx)))
+            .on_action(cx.listener(|this, _: &ViewMedium, _, cx| this.set_view(ViewMode::Medium, cx)))
+            .on_action(cx.listener(|this, _: &ViewList, _, cx| this.set_view(ViewMode::List, cx)))
+            .on_action(cx.listener(|this, _: &ViewDetails, _, cx| this.set_view(ViewMode::Details, cx)))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| { let p = this.page(); this.move_cursor(-p, false, false, false, cx) }))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| { let p = this.page(); this.move_cursor(p, false, false, false, cx) }))
             .on_action(cx.listener(|this, _: &First, _, cx| this.move_cursor(-1, true, false, false, cx)))
             .on_action(cx.listener(|this, _: &Last, _, cx| this.move_cursor(1, true, false, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.move_cursor(-1, false, true, false, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.move_cursor(1, false, true, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.move_rows(-1, true, false, cx)))
+            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.move_rows(1, true, false, cx)))
             .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| { let p = this.page(); this.move_cursor(-p, false, true, false, cx) }))
             .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| { let p = this.page(); this.move_cursor(p, false, true, false, cx) }))
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.move_cursor(-1, true, true, false, cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.move_cursor(1, true, true, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_cursor(-1, false, false, true, cx)))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_cursor(1, false, false, true, cx)))
+            .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_rows(-1, false, true, cx)))
+            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_rows(1, false, true, cx)))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 if this.menu.take().is_some() { return cx.notify() }
                 if this.filter.is_some() { return this.end_filter(window, cx) }
@@ -1190,7 +1441,7 @@ impl Render for PaneView {
             }))
             .child(self.render_header(cx))
             .children(self.render_filter(cx))
-            .child(self.render_columns(widths, cx))
+            .when(grid.is_none(), |d| d.child(self.render_columns(widths, cx)))
             .child(body)
             .children(self.menu.as_ref().map(|(m, _)| deferred(anchored().position(point(px(0.), px(0.))).child(m.clone())).with_priority(5)))
     }

@@ -8,7 +8,7 @@ use crate::theme::{self, Theme};
 use crate::ui::{HEADER_H, TipExt, TitleBarExt, header_icon, icon, popover, ui_text, window_controls};
 use gpui::{prelude::FluentBuilder, *};
 use grids_core::format;
-use grids_core::layout::Layout;
+use grids_core::layout::{self, Layout};
 use grids_core::session::{Appearance, PaneSave, Session};
 use grids_shell::KnownFolderKind;
 use std::cell::Cell;
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -39,6 +39,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", ToggleSidebar, c),
         KeyBinding::new("secondary-shift-g", PickLayout, c),
         KeyBinding::new("escape", CloseAbout, Some("About")),
+        KeyBinding::new("ctrl-alt-shift-left", SwapLeft, c),
+        KeyBinding::new("ctrl-alt-shift-right", SwapRight, c),
+        KeyBinding::new("ctrl-alt-shift-up", SwapUp, c),
+        KeyBinding::new("ctrl-alt-shift-down", SwapDown, c),
     ]);
 }
 
@@ -55,12 +59,12 @@ const SB_ROW: f32 = 30.;
 const SB_R: f32 = 9.;
 const SB_ICON: f32 = 18.;
 const SB_SECTION: f32 = 34.;
-const PRESETS: [usize; 7] = [1, 2, 4, 6, 9, 12, 16];
 
-/// A grid splitter being dragged: column (`vertical`) or row divider `i`.
+/// A grid splitter being dragged: the divider after column `i` (`col` None)
+/// or after pane `i` of column `col`.
 #[derive(Clone)]
 struct SplitDrag {
-    vertical: bool,
+    col: Option<usize>,
     i: usize,
 }
 
@@ -84,7 +88,10 @@ pub struct Workspace {
     /// The About dialog: None when closed, else the tab (0 licence, 1 third-party notices).
     about: Option<u8>,
     about_focus: FocusHandle,
-    picker_hover: Option<(usize, usize)>,
+    /// The picker's "by column" editor: panes per column (0 = no column),
+    /// and whether the mouse is held down on it.
+    col_draft: [usize; 4],
+    col_dragging: bool,
     grid_bounds: Rc<Cell<Bounds<Pixels>>>,
     layout_btn: Rc<Cell<Bounds<Pixels>>>,
     toast: Option<(String, u64)>,
@@ -112,7 +119,8 @@ impl Workspace {
             picker: false,
             about: None,
             about_focus: cx.focus_handle(),
-            picker_hover: None,
+            col_draft: [0; 4],
+            col_dragging: false,
             grid_bounds: Rc::default(),
             layout_btn: Rc::default(),
             toast: None,
@@ -268,8 +276,33 @@ impl Workspace {
 
     // ---- layout
 
+    fn toggle_picker(&mut self, cx: &mut Context<Self>) {
+        self.picker = !self.picker;
+        self.col_draft = [0; 4];
+        for (d, &n) in self.col_draft.iter_mut().zip(&self.layout.cols) { *d = n }
+        self.col_dragging = false;
+        cx.notify();
+    }
+
+    /// Swaps the active pane with its neighbour; folder, history, selection
+    /// and view move along, the cells stay.
+    fn swap_pane(&mut self, dx: i32, dy: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(j) = self.layout.neighbour(self.active, dx, dy) else { return };
+        let i = self.active;
+        self.panes.swap(i, j);
+        for k in [i, j] { self.panes[k].update(cx, |p, cx| { p.index = k; cx.notify() }) }
+        self.maximized = None;
+        self.set_active(j, window, cx);
+        self.schedule_save(cx);
+    }
+
     fn apply_layout(&mut self, new: Layout, window: &mut Window, cx: &mut Context<Self>) {
         self.picker = false;
+        self.apply_layout_keep_picker(new, window, cx);
+    }
+
+    fn apply_layout_keep_picker(&mut self, new: Layout, window: &mut Window, cx: &mut Context<Self>) {
+        if new.cols == self.layout.cols { cx.notify(); return }
         let carry = new.carry_from(&self.layout);
         let old = std::mem::take(&mut self.panes);
         let base = old.get(self.active).map(|p| p.read(cx).save()).unwrap_or_default();
@@ -364,10 +397,10 @@ impl Workspace {
                     .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
                     .when(self.picker, |d| d.bg(Theme::fill_hover_strong()))
                     .child(icon("layout-grid", 18., Theme::icon()))
-                    .child(div().whitespace_nowrap().text_size(px(13.)).child(format!("{} × {}", l.rows, l.cols)))
+                    .child(div().whitespace_nowrap().text_size(px(13.)).child(match l.even() { Some((r, c)) => format!("{r} × {c}"), None => l.label() }))
                     .child({ let b = self.layout_btn.clone(); canvas(move |bounds, _, _| b.set(bounds), |_, _, _, _| {}).absolute().size_full() })
                     .tip(tr(cx, "布局", "Layout"), Some("Ctrl+Shift+G"))
-                    .on_click(cx.listener(|this, _, _, cx| { this.picker = !this.picker; this.picker_hover = None; cx.notify() })),
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(cx))),
             )
             .child(
                 header_icon("maximize-pane", if self.maximized.is_some() { "minimize-2" } else { "maximize-2" }, 32., 17.).ml(px(2.))
@@ -461,44 +494,61 @@ impl Workspace {
         if !self.picker { return None }
         let btn = self.layout_btn.get();
         let en = state::en(cx);
-        let tile = |n: usize, cur: &Layout| {
-            let l = Layout::preset(n);
-            let on = cur.rows == l.rows && cur.cols == l.cols;
-            let mut grid = div().w(px(40.)).h(px(28.)).flex().flex_col().gap(px(2.));
-            for _ in 0..l.rows {
-                let mut row = div().flex_1().flex().gap(px(2.));
-                for _ in 0..l.cols { row = row.child(div().flex_1().rounded(px(2.)).bg(if on { Theme::primary() } else { Theme::icon_muted() }).opacity(if on { 0.9 } else { 0.55 })) }
-                grid = grid.child(row);
-            }
-            div().id(("preset", n)).w(px(68.)).py(px(8.)).rounded(px(8.)).flex().flex_col().items_center().gap(px(5.)).cursor_pointer()
-                .hover(|s| s.bg(Theme::fill_hover()))
-                .when(on, |d| d.bg(Theme::row_selected()))
-                .child(grid)
-                .child(div().text_size(px(theme::UI_SMALL)).text_color(if on { Theme::text() } else { Theme::text_caption() }).child(if en { format!("{n} pane{}", if n > 1 { "s" } else { "" }) } else { format!("{n} 宫格") }))
+        let count_label = |cols: &[usize]| {
+            let n: usize = cols.iter().sum();
+            if en { format!("{} · {n} pane{}", layout::label(cols), if n > 1 { "s" } else { "" }) } else { format!("{} · {n} 格", layout::label(cols)) }
         };
         let cur = self.layout.clone();
         let mut presets = div().flex().flex_wrap().gap(px(4.)).w(px(292.));
-        for n in PRESETS {
-            presets = presets.child(tile(n, &cur).on_click(cx.listener(move |this, _, window, cx| this.apply_layout(Layout::preset(n), window, cx))));
+        for (k, p) in layout::PRESETS.iter().enumerate() {
+            let on = cur.same_shape(p);
+            let n: usize = p.iter().sum();
+            let even = p.iter().all(|&x| x == p[0]);
+            let label = if even { if en { format!("{n} pane{}", if n > 1 { "s" } else { "" }) } else { format!("{n} 宫格") } } else { layout::label(p) };
+            presets = presets.child(
+                div().id(("preset", k)).w(px(68.)).py(px(8.)).rounded(px(8.)).flex().flex_col().items_center().gap(px(5.)).cursor_pointer()
+                    .hover(|s| s.bg(Theme::fill_hover()))
+                    .when(on, |d| d.bg(Theme::row_selected()))
+                    .child(mini_layout(p, on).w(px(40.)).h(px(28.)))
+                    .child(div().text_size(px(theme::UI_SMALL)).text_color(if on { Theme::text() } else { Theme::text_caption() }).child(label))
+                    .on_click(cx.listener(move |this, _, window, cx| this.apply_layout(Layout::columns(p), window, cx))),
+            );
         }
-        let hover = self.picker_hover;
-        let mut custom = div().id("custom-grid").flex().flex_col().gap(px(3.));
-        for r in 0..4 {
-            let mut row = div().flex().gap(px(3.));
-            for c in 0..4 {
-                let lit = hover.is_some_and(|(hr, hc)| r <= hr && c <= hc);
-                let cur_lit = hover.is_none() && r < cur.rows && c < cur.cols;
-                row = row.child(
-                    div().id(("cell", r * 4 + c)).size(px(22.)).rounded(px(4.)).border_1().cursor_pointer()
-                        .border_color(if lit || cur_lit { Theme::primary() } else { Theme::line_border() })
-                        .bg(if lit { Theme::row_selected() } else if cur_lit { Theme::row_selected_inactive() } else { Theme::bg_body() })
-                        .on_hover(cx.listener(move |this, on: &bool, _, cx| { if *on { this.picker_hover = Some((r, c)); cx.notify() } }))
-                        .on_click(cx.listener(move |this, _, window, cx| this.apply_layout(Layout::new(r + 1, c + 1), window, cx))),
-                );
+        // By column: four small bars of four cells; click or press and drag
+        // across them to set each column's panes (the strip under a bar is 0).
+        let draft = self.col_draft;
+        let mut bars = div().id("col-editor").flex().gap(px(6.)).items_end()
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| this.finish_col_drag(window, cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| this.finish_col_drag(window, cx)));
+        for c in 0..4 {
+            let mut bar = div().flex().flex_col().items_center().gap(px(3.));
+            for level in (0..=4usize).rev() {
+                let lit = level > 0 && level <= draft[c];
+                let cell = div().id(("colcell", c * 5 + level)).w(px(30.)).cursor_pointer().rounded(px(3.))
+                    .map(|d| if level == 0 {
+                        d.h(px(8.)).bg(if draft[c] == 0 { Theme::primary().opacity(0.35) } else { Theme::fill_hover_strong() })
+                    } else {
+                        d.h(px(15.)).border_1()
+                            .border_color(if lit { Theme::primary() } else { Theme::line_border() })
+                            .bg(if lit { Theme::primary().opacity(0.8) } else { Theme::bg_body() })
+                    })
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        let d = &mut this.col_draft[c];
+                        // Pressing the top lit cell again takes one off.
+                        *d = if *d == level && level > 0 { level - 1 } else { level };
+                        this.col_dragging = true;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+                        if *on && this.col_dragging && this.col_draft[c] != level { this.col_draft[c] = level; cx.notify() }
+                    }));
+                bar = bar.child(cell);
             }
-            custom = custom.child(row);
+            bar = bar.child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(draft[c].to_string()));
+            bars = bars.child(bar);
         }
-        let (hr, hc) = hover.map_or((cur.rows, cur.cols), |(r, c)| (r + 1, c + 1));
+        let shape = Layout::columns(&draft).cols;
         let section = |t: &'static str| div().px(px(4.)).pb(px(6.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(t);
         let panel = popover()
             .p(px(12.))
@@ -509,15 +559,16 @@ impl Workspace {
             .child(section(tr(cx, "预设", "Presets")))
             .child(presets)
             .child(div().my(px(10.)).h(px(1.)).bg(Theme::line_divider()))
-            .child(section(tr(cx, "自定义（行 × 列）", "Custom (rows × columns)")))
+            .child(section(tr(cx, "按列自定义", "By column")))
             .child(
-                div().flex().items_center().gap(px(16.)).px(px(4.))
-                    .child(custom.on_hover(cx.listener(|this, on: &bool, _, cx| if !*on { this.picker_hover = None; cx.notify() })))
-                    .child(div().flex().flex_col().gap(px(4.))
-                        .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child(format!("{hr} × {hc}")))
-                        .child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(if en { format!("{} panes", hr * hc) } else { format!("共 {} 个窗格", hr * hc) }))),
+                div().flex().items_center().gap(px(18.)).px(px(4.))
+                    .child(bars)
+                    .child(div().flex().flex_col().gap(px(8.))
+                        .child(mini_layout(&shape, true).w(px(84.)).h(px(56.)))
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(count_label(&shape)))),
             )
-            .child(div().pt(px(10.)).px(px(4.)).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "切换布局时保留已有窗格的路径", "Existing panes keep their folders")));
+            .child(div().pt(px(10.)).px(px(4.)).w(px(292.)).text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption())
+                .child(tr(cx, "点击或按住拖动设置每列格数（0 = 无此列）；已有窗格保留路径", "Click or drag to set panes per column (0 = no column); existing panes keep their folders")));
         Some(
             deferred(
                 anchored().anchor(Corner::TopRight).position(btn.top_right() + point(px(0.), btn.size.height + px(6.))).snap_to_window_with_margin(px(8.))
@@ -526,6 +577,13 @@ impl Workspace {
             .with_priority(3)
             .into_any_element(),
         )
+    }
+
+    fn finish_col_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.col_dragging { return }
+        self.col_dragging = false;
+        if self.col_draft.iter().all(|&n| n == 0) { self.col_draft[0] = 1 }
+        self.apply_layout_keep_picker(Layout::columns(&self.col_draft), window, cx);
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -660,39 +718,49 @@ impl Workspace {
     /// the splitters' grab areas lie over the hairlines, drawn after the panes.
     fn render_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.grid_bounds.clone();
-        let mut grid = div().relative().flex_1().min_w_0().min_h_0().flex().flex_col()
+        let mut grid = div().relative().flex_1().min_w_0().min_h_0().flex()
             .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full());
         if let Some(m) = self.maximized.and_then(|m| self.panes.get(m)) {
-            return grid.child(div().flex_1().min_h_0().child(m.clone()));
+            return grid.child(div().flex_1().min_w_0().min_h_0().child(m.clone()));
         }
         let l = &self.layout;
         let line = || div().flex_none().bg(Theme::line_divider());
-        for r in 0..l.rows {
-            let mut row = div().flex().min_h_0().flex_basis(px(0.)).map(|mut d| { d.style().flex_grow = Some(l.row_weights[r]); d });
-            for c in 0..l.cols {
-                let i = l.index(r, c);
-                let Some(p) = self.panes.get(i) else { continue };
-                row = row.child(div().min_w_0().min_h_0().flex_basis(px(0.)).map(|mut d| { d.style().flex_grow = Some(l.col_weights[c]); d }).child(p.clone()));
-                if c + 1 < l.cols { row = row.child(line().w(px(1.)).h_full()) }
+        for (c, &n) in l.cols.iter().enumerate() {
+            let mut col = div().flex().flex_col().min_w_0().min_h_0().flex_basis(px(0.)).map(|mut d| { d.style().flex_grow = Some(l.col_weights[c]); d });
+            for r in 0..n {
+                let Some(p) = self.panes.get(l.index(c, r)) else { continue };
+                col = col.child(div().min_w_0().min_h_0().flex_basis(px(0.)).map(|mut d| { d.style().flex_grow = Some(l.row_weights[c][r]); d }).child(p.clone()));
+                if r + 1 < n { col = col.child(line().h(px(1.)).w_full()) }
             }
-            grid = grid.child(row);
-            if r + 1 < l.rows { grid = grid.child(line().h(px(1.)).w_full()) }
+            grid = grid.child(col);
+            if c + 1 < l.cols.len() { grid = grid.child(line().w(px(1.)).h_full()) }
         }
         let b = self.grid_bounds.get();
         let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
         if w > 1. {
-            for i in 0..l.cols.saturating_sub(1) { grid = grid.child(self.splitter(true, i, l.col_split(i) * w, cx)) }
-            for i in 0..l.rows.saturating_sub(1) { grid = grid.child(self.splitter(false, i, l.row_split(i) * h, cx)) }
+            for i in 0..l.cols.len() - 1 { grid = grid.child(self.splitter(None, i, l.col_split(i) * w, (0., h), cx)) }
+            for (c, &n) in l.cols.iter().enumerate() {
+                let x0 = if c == 0 { 0. } else { l.col_split(c - 1) * w + GRAB + 1. };
+                let x1 = if c + 1 == l.cols.len() { w } else { l.col_split(c) * w - GRAB };
+                for i in 0..n - 1 { grid = grid.child(self.splitter(Some(c), i, l.row_split(c, i) * h, (x0, x1 - x0), cx)) }
+            }
         }
         grid
     }
 
-    /// The grab area over hairline `i` at `at` px from the grid's left / top.
-    fn splitter(&self, vertical: bool, i: usize, at: f32, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The grab area over a hairline: a column divider at `at` px from the
+    /// grid's left spanning `span` = (top, height), or a divider inside column
+    /// `col` at `at` px from the top spanning (left, width).
+    fn splitter(&self, col: Option<usize>, i: usize, at: f32, span: (f32, f32), cx: &mut Context<Self>) -> impl IntoElement {
+        let vertical = col.is_none();
         div()
-            .id(SharedString::from(format!("split-{}-{i}", if vertical { "v" } else { "h" })))
+            .id(SharedString::from(match col { None => format!("split-v-{i}"), Some(c) => format!("split-h-{c}-{i}") }))
             .absolute()
-            .map(|d| if vertical { d.top_0().bottom_0().left(px(at - GRAB)).w(px(GRAB * 2. + 1.)).cursor(CursorStyle::ResizeColumn) } else { d.left_0().right_0().top(px(at - GRAB)).h(px(GRAB * 2. + 1.)).cursor(CursorStyle::ResizeRow) })
+            .map(|d| if vertical {
+                d.top(px(span.0)).h(px(span.1)).left(px(at - GRAB)).w(px(GRAB * 2. + 1.)).cursor(CursorStyle::ResizeColumn)
+            } else {
+                d.left(px(span.0)).w(px(span.1)).top(px(at - GRAB)).h(px(GRAB * 2. + 1.)).cursor(CursorStyle::ResizeRow)
+            })
             .flex()
             .justify_center()
             .items_center()
@@ -700,12 +768,12 @@ impl Workspace {
             .child(div().map(|d| if vertical { d.w(px(1.)).h_full() } else { d.h(px(1.)).w_full() }).invisible().group_hover("splitter", |s| s.visible()).bg(Theme::split_active()))
             .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                 if ev.click_count() >= 2 {
-                    if vertical { this.layout.equalize_cols() } else { this.layout.equalize_rows() }
+                    match col { None => this.layout.equalize_cols(), Some(c) => this.layout.equalize_rows(c) }
                     this.schedule_save(cx);
                     cx.notify();
                 }
             }))
-            .on_drag(SplitDrag { vertical, i }, |d, _, _, cx| cx.new(|_| d.clone()))
+            .on_drag(SplitDrag { col, i }, |d, _, _, cx| cx.new(|_| d.clone()))
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -745,6 +813,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in crate::thumbs::take_evicted(cx) { let _ = window.drop_image(image); }
         let sidebar_open = state::shared(cx).config.sidebar_open;
         let decorations = window.window_decorations();
         div()
@@ -771,22 +840,29 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Pane9, w, cx| this.set_active(8, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleMaximize, window, cx| this.toggle_maximize(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &PickLayout, _, cx| { this.picker = !this.picker; cx.notify() }))
+            .on_action(cx.listener(|this, _: &PickLayout, _, cx| this.toggle_picker(cx)))
+            .on_action(cx.listener(|this, _: &SwapLeft, w, cx| this.swap_pane(-1, 0, w, cx)))
+            .on_action(cx.listener(|this, _: &SwapRight, w, cx| this.swap_pane(1, 0, w, cx)))
+            .on_action(cx.listener(|this, _: &SwapUp, w, cx| this.swap_pane(0, -1, w, cx)))
+            .on_action(cx.listener(|this, _: &SwapDown, w, cx| this.swap_pane(0, 1, w, cx)))
             .on_action(cx.listener(|this, _: &CycleTheme, window, cx| this.cycle_theme(window, cx)))
             .on_drag_move::<SplitDrag>(cx.listener(|this, ev: &DragMoveEvent<SplitDrag>, _, cx| {
                 let d = ev.drag(cx).clone();
                 let b = this.grid_bounds.get();
                 let pos = ev.event.position;
-                if d.vertical {
-                    let w = f32::from(b.size.width).max(1.);
-                    let at = (f32::from(pos.x - b.origin.x) / w).clamp(0., 1.);
-                    let delta = at - this.layout.col_split(d.i);
-                    this.layout.drag_col(d.i, delta);
-                } else {
-                    let h = f32::from(b.size.height).max(1.);
-                    let at = (f32::from(pos.y - b.origin.y) / h).clamp(0., 1.);
-                    let delta = at - this.layout.row_split(d.i);
-                    this.layout.drag_row(d.i, delta);
+                match d.col {
+                    None => {
+                        let w = f32::from(b.size.width).max(1.);
+                        let at = (f32::from(pos.x - b.origin.x) / w).clamp(0., 1.);
+                        let delta = at - this.layout.col_split(d.i);
+                        this.layout.drag_col(d.i, delta);
+                    }
+                    Some(c) => {
+                        let h = f32::from(b.size.height).max(1.);
+                        let at = (f32::from(pos.y - b.origin.y) / h).clamp(0., 1.);
+                        let delta = at - this.layout.row_split(c, d.i);
+                        this.layout.drag_row(c, d.i, delta);
+                    }
                 }
                 this.schedule_save(cx);
                 cx.notify();
@@ -808,4 +884,17 @@ impl Render for Workspace {
             .children(self.render_picker(cx))
             .children(self.render_about(window, cx))
     }
+}
+
+/// A small picture of a layout: one bar of cells per column.
+fn mini_layout(cols: &[usize], on: bool) -> Div {
+    let mut d = div().flex().gap(px(2.));
+    for &n in cols {
+        let mut col = div().flex_1().flex().flex_col().gap(px(2.));
+        for _ in 0..n {
+            col = col.child(div().flex_1().rounded(px(2.)).bg(if on { Theme::primary() } else { Theme::icon_muted() }).opacity(if on { 0.9 } else { 0.55 }));
+        }
+        d = d.child(col);
+    }
+    d
 }

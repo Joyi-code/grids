@@ -44,10 +44,47 @@ pub struct PaneSave {
     pub ascending: bool,
     pub show_hidden: bool,
     pub columns: Columns,
+    pub view: ViewMode,
 }
 
 impl Default for PaneSave {
-    fn default() -> Self { Self { path: PathBuf::new(), sort: SortKey::Name, ascending: true, show_hidden: false, columns: Columns::default() } }
+    fn default() -> Self {
+        Self { path: PathBuf::new(), sort: SortKey::Name, ascending: true, show_hidden: false, columns: Columns::default(), view: ViewMode::Details }
+    }
+}
+
+/// How a pane shows its folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    #[default]
+    Details,
+    List,
+    Medium,
+    Large,
+    Huge,
+}
+
+impl ViewMode {
+    /// In menu / Ctrl+Shift+1..5 order.
+    pub const ALL: [ViewMode; 5] = [ViewMode::Huge, ViewMode::Large, ViewMode::Medium, ViewMode::List, ViewMode::Details];
+
+    /// The thumbnail edge in logical px for the icon views.
+    pub fn icon_px(self) -> Option<f32> {
+        match self {
+            ViewMode::Medium => Some(48.),
+            ViewMode::Large => Some(96.),
+            ViewMode::Huge => Some(192.),
+            _ => None,
+        }
+    }
+
+    /// One step bigger (`up`) or smaller, for Ctrl+wheel; stops at the ends.
+    pub fn step(self, up: bool) -> ViewMode {
+        let i = Self::ALL.iter().position(|&v| v == self).unwrap_or(4);
+        let j = if up { i.saturating_sub(1) } else { (i + 1).min(4) };
+        Self::ALL[j]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -66,6 +103,21 @@ impl Session {
         self.panes.truncate(n);
         while self.panes.len() < n {
             self.panes.push(PaneSave { path: home.to_path_buf(), ..Default::default() });
+        }
+        if let Some(rows) = self.layout.legacy_rows.take() {
+            // An old rows × cols session numbered its panes row by row; now
+            // they go down each column. Keep every folder in its cell.
+            let cols = n / rows;
+            let old = std::mem::take(&mut self.panes);
+            let mut active = 0;
+            for c in 0..cols {
+                for r in 0..rows {
+                    let j = r * cols + c;
+                    if j == self.active { active = self.panes.len() }
+                    self.panes.push(old[j].clone());
+                }
+            }
+            self.active = active;
         }
         for p in &mut self.panes {
             if p.path.as_os_str().is_empty() { p.path = home.to_path_buf(); }
@@ -196,9 +248,21 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"sidebar_open": false, "future_field": 1, "current": {"layout": {"rows": 2, "cols": 9, "row_weights": [], "col_weights": []}}}"#).unwrap();
         assert!(!c.sidebar_open);
         let s = c.current.normalized(Path::new("/h"));
-        assert_eq!((s.layout.rows, s.layout.cols, s.panes.len()), (2, 4, 8));
+        assert_eq!((s.layout.cols.clone(), s.panes.len()), (vec![2; 4], 8));
         assert_eq!(s.panes[7].path, PathBuf::from("/h"));
         assert_eq!(Config::load(Path::new("/nonexistent/x.json")), Config::default());
+    }
+
+    #[test]
+    fn migrates_row_major_panes() {
+        let c: Config = serde_json::from_str(r#"{"current": {"layout": {"rows": 2, "cols": 3, "row_weights": [], "col_weights": []},
+            "panes": [{"path": "/a"}, {"path": "/b"}, {"path": "/c"}, {"path": "/d"}, {"path": "/e"}, {"path": "/f"}], "active": 1}}"#).unwrap();
+        let s = c.current.normalized(Path::new("/h"));
+        let paths: Vec<_> = s.panes.iter().map(|p| p.path.to_string_lossy().into_owned()).collect();
+        // a b c / d e f → columns a d, b e, c f
+        assert_eq!(paths, ["/a", "/d", "/b", "/e", "/c", "/f"]);
+        assert_eq!(s.active, 2);
+        assert_eq!(s.clone().normalized(Path::new("/h")), s);
     }
 
     #[test]

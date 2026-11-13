@@ -13,4 +13,4 @@ pub mod session;
 pub use layout::Layout;
 pub use listing::{Entry, FileKind};
 pub use pane::{PaneState, SortKey};
-pub use session::{Config, PaneSave, Session};
+pub use session::{Config, PaneSave, Session, ViewMode};

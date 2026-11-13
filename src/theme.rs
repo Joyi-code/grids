@@ -273,7 +273,6 @@ impl Theme {
     /// Selected rows: the accent, light.
     pub fn row_selected() -> Hsla { ca(craft::B500, 0.14) }
     /// Selected rows in a pane without focus.
-    pub fn row_selected_inactive() -> Hsla { ca(craft::N1000, 0.07) }
     /// Text selection in fields.
     pub fn selection() -> Hsla { ca(craft::B500, 0.24) }
     pub fn caret() -> Hsla { c(craft::B500) }
