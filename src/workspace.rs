@@ -19,14 +19,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 mod palette;
+mod today;
 
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette, OpenToday]
 );
 
 pub fn bind_keys(cx: &mut App) {
     palette::bind_keys(cx);
+    today::bind_keys(cx);
     let c = Some("Workspace");
     cx.bind_keys([
         KeyBinding::new("secondary-k", CommandPalette, c),
@@ -154,6 +156,7 @@ pub struct Workspace {
     shelf_busy: bool,
     note_edit: Option<NoteEdit>,
     palette: Option<palette::Palette>,
+    today: Option<today::Today>,
     _subs: Vec<Subscription>,
 }
 
@@ -193,6 +196,7 @@ impl Workspace {
             shelf_busy: false,
             note_edit: None,
             palette: None,
+            today: None,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -221,7 +225,9 @@ impl Workspace {
             PaneEvent::FsChanged(dirs) => {
                 for p in this.panes.clone() { p.update(cx, |p, cx| p.refresh_if_showing(dirs, cx)) }
                 this.recheck_shelf(cx);
+                for d in dirs { this.today_disk_changed(d, cx) }
             }
+            PaneEvent::DiskChanged(dir) => this.today_disk_changed(dir, cx),
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
             PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
             PaneEvent::ToggleMaximize => {
@@ -428,6 +434,7 @@ impl Workspace {
     }
 
     fn go_to(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.drop_today();
         if let Some(p) = self.active_pane().cloned() {
             p.update(cx, |p, cx| p.navigate(path, cx));
             window.focus(&p.read(cx).focus);
@@ -951,6 +958,15 @@ impl Workspace {
         };
         let mut col = div().id("sidebar-scroll").flex().flex_col().pb(px(10.)).overflow_y_scroll().flex_1().min_h_0();
 
+        let today_on = self.today.is_some();
+        col = col.child(div().h(px(6.))).child(
+            div().id("side-today").h(px(SB_ROW)).mx(px(SB_X)).mb(px(1.)).pl(px(6.)).pr(px(4.)).rounded(px(SB_R)).flex().items_center().cursor_pointer()
+                .text_color(Theme::sidebar_text())
+                .map(|d| if today_on { d.bg(Theme::sidebar_selected()) } else { d.hover(|s| s.bg(Theme::sidebar_hover())) })
+                .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(icon("calendar-clock", SB_ICON, Theme::primary())))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(tr(cx, "今日", "Today")))
+                .on_click(cx.listener(|this, _, window, cx| if this.today.is_some() { this.close_today(window, cx) } else { this.open_today(window, cx) })),
+        );
         col = col.child(section(tr(cx, "快速访问", "Quick access")));
         for (i, k) in self.known.iter().enumerate() {
             let (glyph, label) = match k.kind {
@@ -1068,6 +1084,7 @@ impl Workspace {
         let bounds = self.grid_bounds.clone();
         let mut grid = div().relative().flex_1().min_w_0().min_h_0().flex()
             .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full());
+        if let Some(t) = self.render_today(cx) { return grid.child(t) }
         if let Some(m) = self.maximized.and_then(|m| self.panes.get(m)) {
             return grid.child(div().flex_1().min_w_0().min_h_0().child(m.clone()));
         }
@@ -1461,6 +1478,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SwapDown, w, cx| this.swap_pane(0, 1, w, cx)))
             .on_action(cx.listener(|this, _: &CycleTheme, window, cx| this.cycle_theme(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenToday, window, cx| this.open_today(window, cx)))
             .on_drag_move::<SplitDrag>(cx.listener(|this, ev: &DragMoveEvent<SplitDrag>, _, cx| {
                 let d = ev.drag(cx).clone();
                 let b = this.grid_bounds.get();

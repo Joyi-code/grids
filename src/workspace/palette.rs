@@ -33,6 +33,7 @@ pub(super) enum Act {
     Action(Rc<dyn Action>),
     Folder(PathBuf),
     Session(String),
+    Today,
     SaveSession,
 }
 
@@ -85,6 +86,7 @@ struct Command {
 fn act<A: Action + Default>() -> Act { Act::Action(Rc::new(A::default())) }
 
 const COMMANDS: &[Command] = &[
+    Command { zh: "今日视图", en: "Today", glyph: "calendar-clock", make: || Act::Today },
     Command { zh: "新建文件夹", en: "New folder", glyph: "folder-plus", make: act::<pane::NewFolder> },
     Command { zh: "刷新", en: "Refresh", glyph: "refresh-cw", make: act::<pane::Refresh> },
     Command { zh: "上一级", en: "Up one level", glyph: "arrow-up", make: act::<pane::GoUp> },
@@ -271,7 +273,10 @@ impl Workspace {
             self.refocus(window, cx);
         }
         match item.act {
-            Act::Folder(path) => self.go_to(path, window, cx),
+            Act::Folder(path) => {
+                if self.today.is_some() { self.close_today(window, cx) }
+                self.go_to(path, window, cx)
+            }
             Act::Session(name) => {
                 let session = state::shared(cx).config.sessions.iter().find(|s| s.name == name).map(|s| s.session.clone());
                 if let Some(session) = session {
@@ -280,11 +285,15 @@ impl Workspace {
                     self.schedule_save(cx);
                 }
             }
+            Act::Today => self.open_today(window, cx),
             Act::SaveSession => {
                 if !state::shared(cx).config.sidebar_open { self.toggle_sidebar(cx) }
                 self.start_save_session(window, cx)
             }
-            Act::Action(a) => window.dispatch_action(a.boxed_clone(), cx),
+            Act::Action(a) => {
+                if self.today.is_some() { self.close_today(window, cx) }
+                window.dispatch_action(a.boxed_clone(), cx)
+            }
         }
         cx.notify();
     }

@@ -135,6 +135,8 @@ pub enum PaneEvent {
     Locked(PathBuf),
     /// Open the note editor for this folder.
     EditNote(PathBuf),
+    /// The watcher saw entries change in this folder (the Today view rescans).
+    DiskChanged(PathBuf),
 }
 
 /// Files dragged from a pane.
@@ -311,7 +313,7 @@ impl PaneView {
                             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
                             grids_core::frecency::visit(&mut cx.global_mut::<state::Shared>().config.recent, &path, now);
                         }
-                        this.note_changes(&path, live, &entries);
+                        if this.note_changes(&path, live, &entries) { cx.emit(PaneEvent::DiskChanged(path.clone())) }
                         this.state.set_entries(entries, select.as_deref());
                         let mut jump = select.is_some();
                         if let Some(names) = this.pending_select.take() { this.state.select_names(&names); jump = true }
@@ -382,6 +384,21 @@ impl PaneView {
     pub fn navigate(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.close_editors();
         if self.state.navigate(path) { self.after_move(None, cx) } else { self.load(None, cx) }
+    }
+
+    /// Shows `file`'s folder with `file` selected (Today: 在原格子定位).
+    pub fn reveal_path(&mut self, file: &Path, cx: &mut Context<Self>) {
+        let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else { return };
+        let names = vec![name.to_string_lossy().into_owned()];
+        self.close_editors();
+        if grids_core::link::same_path(dir, &self.state.path) && !self.loading {
+            self.state.select_names(&names);
+            if let Some(r) = self.state.cursor { self.reveal(r, ScrollStrategy::Center) }
+            cx.notify();
+        } else {
+            self.pending_select = Some(names);
+            self.navigate(dir.to_path_buf(), cx);
+        }
     }
 
     fn after_move(&mut self, select: Option<String>, cx: &mut Context<Self>) {
