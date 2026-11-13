@@ -179,23 +179,35 @@ pub fn background_menu(hwnd: isize, folder: &Path, screen_pos: (i32, i32)) -> Me
     imp::background_menu(hwnd, folder, screen_pos)
 }
 
+/// One item a file operation actually processed, for the operation journal.
+///
+/// Items the user skipped in a conflict dialog, and items that failed, are
+/// not reported; children inside a copied / moved folder are not reported
+/// separately (the folder is one item).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpItem {
+    /// The path before the operation (for `create_new_tracked`: the new file).
+    pub src: PathBuf,
+    /// Where the item ended up: the real copy / move / rename target,
+    /// including an automatic "名称 - 副本 (2)" name; for a recycle, the
+    /// item inside the recycle bin (Windows: `X:\$Recycle.Bin\<SID>\$R…`)
+    /// when the shell reports it; `None` for a permanent delete.
+    pub dst: Option<PathBuf>,
+    /// The item is a folder.
+    pub is_dir: bool,
+}
+
 /// Moves to the recycle bin (IFileOperation, FOF_ALLOWUNDO). Elsewhere the
 /// freedesktop trash (`~/.local/share/Trash`) or `~/.Trash` on macOS.
 /// `Err(Interrupted)` when the user cancelled.
 pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    imp::recycle(paths)
+    recycle_tracked(paths).map(drop)
 }
 
 /// Deletes permanently (Windows asks for confirmation as Explorer's
 /// Shift+Del does). `Err(Interrupted)` when the user cancelled.
 pub fn delete(paths: &[PathBuf]) -> io::Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    imp::delete(paths)
+    delete_tracked(paths).map(drop)
 }
 
 /// Copies `paths` into the folder `dest` (system progress dialog on Windows).
@@ -203,22 +215,54 @@ pub fn delete(paths: &[PathBuf]) -> io::Result<()> {
 /// ("名称 - 副本.txt", "名称 - 副本 (2).txt"). `Err(Interrupted)` when the
 /// user cancelled.
 pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    imp::copy(paths, dest)
+    copy_tracked(paths, dest).map(drop)
 }
 
 /// Moves `paths` into the folder `dest`. Items already in `dest` are left
 /// alone. `Err(Interrupted)` when the user cancelled.
 pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+    move_tracked(paths, dest).map(drop)
+}
+
+/// [`recycle`], returning what was recycled. When the user cancels part-way
+/// the items already done are returned as `Ok`; `Err(Interrupted)` only when
+/// nothing was done.
+pub fn recycle_tracked(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    imp::recycle(paths)
+}
+
+/// [`delete`], returning what was deleted (`dst` is `None`). Partial
+/// cancellation as in [`recycle_tracked`].
+pub fn delete_tracked(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    imp::delete(paths)
+}
+
+/// [`copy`], returning each copy's real path (automatic "副本" names
+/// included; items skipped in the conflict dialog are absent). Partial
+/// cancellation as in [`recycle_tracked`].
+pub fn copy_tracked(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    imp::copy(paths, dest)
+}
+
+/// [`move_`], returning where each item went. Partial cancellation as in
+/// [`recycle_tracked`].
+pub fn move_tracked(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
     let paths: Vec<PathBuf> = paths
         .iter()
         .filter(|p| !parent_is(p, dest))
         .cloned()
         .collect();
     if paths.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     imp::move_(&paths, dest)
 }
@@ -243,6 +287,73 @@ pub fn rename(path: &Path, new_name: &str) -> io::Result<PathBuf> {
     }
     std::fs::rename(path, &to)?;
     Ok(to)
+}
+
+/// [`rename`] as one [`OpItem`]; empty when the name did not change.
+pub fn rename_tracked(path: &Path, new_name: &str) -> io::Result<Vec<OpItem>> {
+    let is_dir = path.is_dir();
+    let to = rename(path, new_name)?;
+    if to == path {
+        return Ok(Vec::new());
+    }
+    Ok(vec![OpItem {
+        src: path.to_path_buf(),
+        dst: Some(to),
+        is_dir,
+    }])
+}
+
+/// [`create_new`] as one [`OpItem`] (`src` and `dst` both the new file).
+pub fn create_new_tracked(dir: &Path, ext: &str) -> io::Result<Vec<OpItem>> {
+    let path = create_new(dir, ext)?;
+    Ok(vec![OpItem {
+        src: path.clone(),
+        dst: Some(path),
+        is_dir: false,
+    }])
+}
+
+/// Puts back an item recycled from `original`: the recycle-bin entry with
+/// that original path whose deletion time is nearest `deleted_near` (within
+/// 10 seconds). Windows walks the Recycle Bin (FOLDERID_RecycleBinFolder)
+/// and runs its "undelete" verb; elsewhere the freedesktop trash.
+/// Returns the restored path (= `original`). Errors: `NotFound` when no
+/// entry matches, `AlreadyExists` when something now sits at `original`.
+pub fn restore_from_recycle_bin(
+    original: &Path,
+    deleted_near: std::time::SystemTime,
+) -> io::Result<PathBuf> {
+    if std::fs::symlink_metadata(original).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", original.display()),
+        ));
+    }
+    imp::restore_from_recycle_bin(original, deleted_near)
+}
+
+/// Seconds between two times, either order.
+fn secs_apart(a: std::time::SystemTime, b: std::time::SystemTime) -> f64 {
+    match a.duration_since(b) {
+        Ok(d) => d.as_secs_f64(),
+        Err(e) => e.duration().as_secs_f64(),
+    }
+}
+
+/// Picks the candidate (path, deletion time) whose original matches and
+/// whose time is nearest `near`, within 10 s.
+fn nearest_deleted<T>(
+    candidates: impl IntoIterator<Item = (T, PathBuf, std::time::SystemTime)>,
+    original: &Path,
+    near: std::time::SystemTime,
+) -> Option<T> {
+    candidates
+        .into_iter()
+        .filter(|(_, orig, _)| same_path(orig, original))
+        .map(|(t, _, when)| (t, secs_apart(when, near)))
+        .filter(|(_, d)| *d <= 10.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(t, _)| t)
 }
 
 /// Programs recommended for opening `path` (SHAssocEnumHandlers,
@@ -573,6 +684,36 @@ fn copy_tree(src: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_deleted_picks_closest_within_10s() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = |s: u64| UNIX_EPOCH + Duration::from_secs(s);
+        let orig = if cfg!(windows) {
+            PathBuf::from(r"C:\A\b.txt")
+        } else {
+            PathBuf::from("/a/b.txt")
+        };
+        let other = if cfg!(windows) {
+            PathBuf::from(r"C:\A\c.txt")
+        } else {
+            PathBuf::from("/a/c.txt")
+        };
+        let cands = vec![
+            (1, orig.clone(), t(1000)),
+            (2, orig.clone(), t(1007)),
+            (3, other.clone(), t(1009)),
+            (4, orig.clone(), t(1030)),
+        ];
+        assert_eq!(nearest_deleted(cands.clone(), &orig, t(1009)), Some(2));
+        assert_eq!(nearest_deleted(cands.clone(), &orig, t(995)), Some(1));
+        assert_eq!(nearest_deleted(cands.clone(), &orig, t(1019)), None);
+        assert_eq!(nearest_deleted(cands, &other, t(1000)), Some(3));
+        if cfg!(windows) {
+            let c = vec![(9, PathBuf::from(r"c:\a\B.TXT"), t(5))];
+            assert_eq!(nearest_deleted(c, &orig, t(5)), Some(9));
+        }
+    }
 
     #[test]
     fn new_files_numbered() {

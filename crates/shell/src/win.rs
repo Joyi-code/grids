@@ -3,8 +3,8 @@
 //! (efww/grids, MIT), re-written for a GPUI-drawn app.
 
 use crate::{
-    Drive, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, RgbaImage, classify_target,
-    parent_is,
+    Drive, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, OpItem, RgbaImage,
+    classify_target, parent_is,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
     ERROR_CANCELLED, ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE,
-    HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, SIZE, WPARAM,
+    HGLOBAL, HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, S_OK, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -22,7 +22,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, GetDriveTypeW,
-    GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW, WIN32_FIND_DATAW,
+    GetLogicalDrives, GetLongPathNameW, GetVolumeInformationW, GetVolumePathNameW,
+    WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
@@ -68,7 +69,9 @@ use windows::Win32::UI::Shell::{
     ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_THUMBNAILONLY,
+    BHID_EnumItems, FOLDERID_RecycleBinFolder, IEnumShellItems, IFileOperationProgressSink,
+    IFileOperationProgressSink_Impl, IShellItemImageFactory, SHGetKnownFolderItem,
+    SIGDN_FILESYSPATH, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_THUMBNAILONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
@@ -76,9 +79,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WINDOW_EX_STYLE, WM_DRAWITEM,
     WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_MENUSELECT, WM_NULL, WNDCLASSEXW, WS_POPUP,
 };
-use windows::core::{GUID, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, w};
+use windows::core::{
+    GUID, HRESULT, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, Ref, implement, w,
+};
 
 const CMIC_MASK_UNICODE: u32 = 0x4000;
+const CMIC_MASK_FLAG_NO_UI: u32 = 0x0400;
 const CMIC_MASK_SHIFT_DOWN: u32 = 0x1000_0000;
 const CMIC_MASK_CONTROL_DOWN: u32 = 0x4000_0000;
 const FIRST_CMD: u32 = 1;
@@ -729,57 +735,271 @@ fn items(paths: &[PathBuf]) -> io::Result<IShellItemArray> {
     unsafe { SHCreateShellItemArrayFromIDLists(&raw) }.map_err(win_err)
 }
 
-/// Runs one IFileOperation; no owner window, so its progress and conflict
-/// dialogs belong to the calling (worker) thread, as in the original Grids.
-fn file_op(
-    flags: FILEOPERATION_FLAGS,
-    add: impl FnOnce(&IFileOperation) -> io::Result<()>,
-) -> io::Result<()> {
-    ensure_com();
-    unsafe {
-        let op: IFileOperation =
-            CoCreateInstance(&FileOperation, None, CLSCTX_ALL).map_err(win_err)?;
-        op.SetOperationFlags(flags).map_err(win_err)?;
-        add(&op)?;
-        let done = op.PerformOperations();
-        if op.GetAnyOperationsAborted().is_ok_and(|b| b.as_bool()) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-        done.map_err(win_err)
+/// `p` with 8.3 short components expanded ("C:\Users\RUNNER~1" ->
+/// "C:\Users\runneradmin"), the form the shell reports. Works for a path
+/// that no longer exists by expanding its nearest existing parent.
+fn long_path(p: &Path) -> PathBuf {
+    let w = wide(p);
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe { GetLongPathNameW(&w, Some(&mut buf)) } as usize;
+    if n > 0 && n < buf.len() {
+        return PathBuf::from(from_wide(&buf));
+    }
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) if parent != p => long_path(parent).join(name),
+        _ => p.to_path_buf(),
     }
 }
 
-pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
+/// File-system path of a shell item; `None` for virtual items.
+fn fs_path(item: &IShellItem) -> Option<PathBuf> {
+    unsafe {
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as _));
+        s.map(PathBuf::from)
+    }
+}
+
+/// Collects what an IFileOperation actually did (IFileOperationProgressSink).
+#[implement(IFileOperationProgressSink)]
+struct OpSink {
+    done: std::rc::Rc<RefCell<Vec<(PathBuf, Option<PathBuf>)>>>,
+}
+
+impl OpSink {
+    fn record(
+        &self,
+        src: Ref<'_, IShellItem>,
+        hr: HRESULT,
+        new: Ref<'_, IShellItem>,
+        need_new: bool,
+    ) {
+        // S_OK only: a skipped item reports a COPYENGINE_S_* success code
+        if hr != S_OK {
+            return;
+        }
+        let Some(src) = src.as_ref().and_then(fs_path) else {
+            return;
+        };
+        let dst = new.as_ref().and_then(fs_path);
+        if need_new && dst.is_none() {
+            return;
+        }
+        self.done.borrow_mut().push((src, dst));
+    }
+}
+
+#[allow(non_snake_case)]
+impl IFileOperationProgressSink_Impl for OpSink_Impl {
+    fn StartOperations(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn FinishOperations(&self, _: HRESULT) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreRenameItem(
+        &self,
+        _: u32,
+        _: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostRenameItem(
+        &self,
+        _: u32,
+        item: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        new: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, new, true);
+        Ok(())
+    }
+    fn PreMoveItem(
+        &self,
+        _: u32,
+        _: Ref<'_, IShellItem>,
+        _: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostMoveItem(
+        &self,
+        _: u32,
+        item: Ref<'_, IShellItem>,
+        _: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        new: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, new, true);
+        Ok(())
+    }
+    fn PreCopyItem(
+        &self,
+        _: u32,
+        _: Ref<'_, IShellItem>,
+        _: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostCopyItem(
+        &self,
+        _: u32,
+        item: Ref<'_, IShellItem>,
+        _: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        new: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, new, true);
+        Ok(())
+    }
+    fn PreDeleteItem(&self, _: u32, _: Ref<'_, IShellItem>) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostDeleteItem(
+        &self,
+        _: u32,
+        item: Ref<'_, IShellItem>,
+        hr: HRESULT,
+        new: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        self.record(item, hr, new, false);
+        Ok(())
+    }
+    fn PreNewItem(&self, _: u32, _: Ref<'_, IShellItem>, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostNewItem(
+        &self,
+        _: u32,
+        _: Ref<'_, IShellItem>,
+        _: &PCWSTR,
+        _: &PCWSTR,
+        _: u32,
+        _: HRESULT,
+        _: Ref<'_, IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn UpdateProgress(&self, _: u32, _: u32) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResetTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs one IFileOperation over `paths`; no owner window, so its progress and
+/// conflict dialogs belong to the calling (worker) thread, as in the
+/// original Grids. Returns the top-level items done (children of a folder
+/// are reported by the shell too; they are dropped here).
+fn file_op(
+    paths: &[PathBuf],
+    flags: FILEOPERATION_FLAGS,
+    add: impl FnOnce(&IFileOperation) -> io::Result<()>,
+) -> io::Result<Vec<OpItem>> {
+    ensure_com();
+    let is_dir: Vec<bool> = paths.iter().map(|p| p.is_dir()).collect();
+    let long: Vec<PathBuf> = paths.iter().map(|p| long_path(p)).collect();
+    let log = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let sink: IFileOperationProgressSink = OpSink { done: log.clone() }.into();
+    let (done, aborted) = unsafe {
+        let op: IFileOperation =
+            CoCreateInstance(&FileOperation, None, CLSCTX_ALL).map_err(win_err)?;
+        op.SetOperationFlags(flags).map_err(win_err)?;
+        let cookie = op.Advise(&sink).map_err(win_err)?;
+        let added = add(&op);
+        let done = added.and_then(|()| op.PerformOperations().map_err(win_err));
+        let _ = op.Unadvise(cookie);
+        (
+            done,
+            op.GetAnyOperationsAborted().is_ok_and(|b| b.as_bool()),
+        )
+    };
+    let mut items = Vec::new();
+    drop(sink);
+    let collected = log.take();
+    let mut seen = vec![false; paths.len()];
+    for (src, dst) in collected {
+        let Some(i) = long.iter().position(|p| crate::same_path(p, &src)) else {
+            continue;
+        };
+        match seen.get_mut(i) {
+            Some(s) if !*s => *s = true,
+            _ => continue,
+        }
+        if let Some(orig) = paths.get(i) {
+            items.push(OpItem {
+                src: orig.clone(),
+                dst,
+                is_dir: is_dir.get(i).copied().unwrap_or(false),
+            });
+        }
+    }
+    if items.is_empty() {
+        if aborted {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        done?;
+    }
+    Ok(items)
+}
+
+pub fn recycle(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
     recycle_with(paths, FILEOPERATION_FLAGS(0))
 }
 
-pub fn delete(paths: &[PathBuf]) -> io::Result<()> {
+pub fn delete(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
     delete_with(paths, FILEOPERATION_FLAGS(0))
 }
 
-pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
     copy_with(paths, dest, FILEOPERATION_FLAGS(0))
 }
 
-pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
     move_with(paths, dest, FILEOPERATION_FLAGS(0))
 }
 
 // `extra`: FOF_NO_UI in the tests, so no dialog can wait for a click on the CI runner.
 
-fn recycle_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<()> {
+fn recycle_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<Vec<OpItem>> {
     let arr = items(paths)?;
     let flags =
         FOF_ALLOWUNDO | FOFX_RECYCLEONDELETE | FOF_WANTNUKEWARNING | FOFX_ADDUNDORECORD | extra;
-    file_op(flags, |op| unsafe { op.DeleteItems(&arr) }.map_err(win_err))
+    file_op(paths, flags, |op| {
+        unsafe { op.DeleteItems(&arr) }.map_err(win_err)
+    })
 }
 
-fn delete_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<()> {
+fn delete_with(paths: &[PathBuf], extra: FILEOPERATION_FLAGS) -> io::Result<Vec<OpItem>> {
     let arr = items(paths)?;
-    file_op(extra, |op| unsafe { op.DeleteItems(&arr) }.map_err(win_err))
+    let mut done = file_op(paths, extra, |op| {
+        unsafe { op.DeleteItems(&arr) }.map_err(win_err)
+    })?;
+    for it in &mut done {
+        it.dst = None;
+    }
+    Ok(done)
 }
 
-fn copy_with(paths: &[PathBuf], dest: &Path, extra: FILEOPERATION_FLAGS) -> io::Result<()> {
+fn copy_with(
+    paths: &[PathBuf],
+    dest: &Path,
+    extra: FILEOPERATION_FLAGS,
+) -> io::Result<Vec<OpItem>> {
     // into the folder they already sit in: Explorer's "名称 - 副本" names; else its conflict dialog
     let same = paths.iter().all(|p| parent_is(p, dest));
     let mut flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD | extra;
@@ -787,17 +1007,141 @@ fn copy_with(paths: &[PathBuf], dest: &Path, extra: FILEOPERATION_FLAGS) -> io::
         flags |= FOF_RENAMEONCOLLISION;
     }
     let (arr, to) = (items(paths)?, item(dest)?);
-    file_op(flags, |op| {
+    file_op(paths, flags, |op| {
         unsafe { op.CopyItems(&arr, &to) }.map_err(win_err)
     })
 }
 
-fn move_with(paths: &[PathBuf], dest: &Path, extra: FILEOPERATION_FLAGS) -> io::Result<()> {
+fn move_with(
+    paths: &[PathBuf],
+    dest: &Path,
+    extra: FILEOPERATION_FLAGS,
+) -> io::Result<Vec<OpItem>> {
     let (arr, to) = (items(paths)?, item(dest)?);
     file_op(
+        paths,
         FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD | extra,
         |op| unsafe { op.MoveItems(&arr, &to) }.map_err(win_err),
     )
+}
+
+// ---------- recycle bin ----------
+
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+/// Original path and deletion time from a `$I…` file (format 1: Vista-8.1,
+/// fixed 260-char path; format 2: Windows 10+, length-prefixed path).
+fn parse_recycle_info(b: &[u8]) -> Option<(PathBuf, std::time::SystemTime)> {
+    let u64_at =
+        |i: usize| -> Option<u64> { Some(u64::from_le_bytes(b.get(i..i + 8)?.try_into().ok()?)) };
+    let version = u64_at(0)?;
+    let filetime = u64_at(16)?;
+    let units: Vec<u16> = match version {
+        1 => b.get(24..24 + 520)?,
+        2 => {
+            let n = u32::from_le_bytes(b.get(24..28)?.try_into().ok()?) as usize;
+            b.get(28..28 + n.checked_mul(2)?)?
+        }
+        _ => return None,
+    }
+    .as_chunks::<2>()
+    .0
+    .iter()
+    .map(|c| u16::from_le_bytes(*c))
+    .collect();
+    let path = from_wide(&units);
+    if path.is_empty() {
+        return None;
+    }
+    let when = std::time::UNIX_EPOCH
+        + std::time::Duration::from_nanos(
+            filetime
+                .checked_sub(FILETIME_UNIX_EPOCH)?
+                .checked_mul(100)?,
+        );
+    Some((PathBuf::from(path), when))
+}
+
+/// `$Rxxxxxx.ext` -> its `$Ixxxxxx.ext` sibling.
+fn recycle_info_path(r: &Path) -> Option<PathBuf> {
+    let name = r.file_name()?.to_str()?;
+    let rest = name.strip_prefix("$R")?;
+    Some(r.with_file_name(format!("$I{rest}")))
+}
+
+/// Every entry in the Recycle Bin (all drives) as (item, original, deleted).
+fn recycle_bin_entries() -> io::Result<Vec<(IShellItem, PathBuf, std::time::SystemTime)>> {
+    ensure_com();
+    let mut out = Vec::new();
+    unsafe {
+        let bin: IShellItem =
+            SHGetKnownFolderItem(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None)
+                .map_err(win_err)?;
+        let en: IEnumShellItems = bin.BindToHandler(None, &BHID_EnumItems).map_err(win_err)?;
+        loop {
+            let mut got = [None];
+            let mut n = 0u32;
+            if en.Next(&mut got, Some(&mut n)).is_err() || n == 0 {
+                break;
+            }
+            let [Some(it)] = got else { break };
+            let Some(info) = fs_path(&it).as_deref().and_then(recycle_info_path) else {
+                continue;
+            };
+            if let Some((orig, when)) = std::fs::read(&info)
+                .ok()
+                .and_then(|b| parse_recycle_info(&b))
+            {
+                out.push((it, orig, when));
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn restore_from_recycle_bin(
+    original: &Path,
+    near: std::time::SystemTime,
+) -> io::Result<PathBuf> {
+    let entries = recycle_bin_entries()?;
+    let Some(it) = crate::nearest_deleted(entries, &long_path(original), near) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not in the Recycle Bin", original.display()),
+        ));
+    };
+    let r_path = fs_path(&it);
+    unsafe {
+        let cm: IContextMenu = it.BindToHandler(None, &BHID_SFUIObject).map_err(win_err)?;
+        let menu = CreatePopupMenu().map_err(win_err)?;
+        let _ = cm.QueryContextMenu(menu, 0, FIRST_CMD, LAST_CMD, CMF_NORMAL);
+        let info = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: CMIC_MASK_FLAG_NO_UI,
+            lpVerb: PCSTR(c"undelete".as_ptr().cast()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        let invoked = cm.InvokeCommand(&info);
+        let _ = DestroyMenu(menu);
+        // the verb may finish on another thread: wait a little for the file
+        for _ in 0..50 {
+            if std::fs::symlink_metadata(original).is_ok() {
+                return Ok(original.to_path_buf());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        invoked.map_err(win_err)?;
+    }
+    // the verb ran but nothing came back: put the $R item back by hand
+    let r = r_path.ok_or_else(|| io::Error::other("Recycle Bin item has no path"))?;
+    std::fs::rename(&r, original)?;
+    if let Some(i) = recycle_info_path(&r) {
+        let _ = std::fs::remove_file(i);
+    }
+    let w = wide(original);
+    unsafe { SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, Some(w.as_ptr() as _), None) };
+    Ok(original.to_path_buf())
 }
 
 // ---------- drives and known folders ----------
@@ -1724,6 +2068,108 @@ mod tests {
         recycle_with(&[d.join("sub")], FOF_NO_UI).unwrap();
         assert!(!d.join("sub").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tracked_ops_report_real_paths() {
+        use windows::Win32::UI::Shell::FOF_NO_UI;
+        let d = std::env::temp_dir().join(format!("grids_win_tracked_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("to")).unwrap();
+        std::fs::create_dir_all(d.join("dir")).unwrap();
+        std::fs::write(d.join("dir").join("inner.txt"), "i").unwrap();
+        std::fs::write(d.join("a.txt"), "a").unwrap();
+        // copy into its own folder: the shell renames; dst must be the real copy
+        let done = copy_with(&[d.join("a.txt")], &d, FOF_NO_UI).unwrap();
+        println!("copy conflict -> {done:?}");
+        assert_eq!(done.len(), 1);
+        let dst = done[0].dst.clone().unwrap();
+        assert_eq!(done[0].src, d.join("a.txt"));
+        assert!(
+            !crate::same_path(&dst, &long_path(&d.join("a.txt"))),
+            "{dst:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "a");
+        // a folder is one item, its children are not reported
+        let done = copy_with(&[d.join("dir"), d.join("a.txt")], &d.join("to"), FOF_NO_UI).unwrap();
+        println!("copy folder -> {done:?}");
+        assert_eq!(done.len(), 2);
+        assert!(done[0].is_dir && !done[1].is_dir);
+        assert!(done[0].dst.as_ref().unwrap().join("inner.txt").is_file());
+        // move
+        let done = move_with(&[d.join("to").join("a.txt")], &d.join("dir"), FOF_NO_UI).unwrap();
+        assert!(crate::same_path(
+            done[0].dst.as_ref().unwrap(),
+            &long_path(&d.join("dir").join("a.txt"))
+        ));
+        // recycle, then put it back from the Recycle Bin
+        let victim = d.join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        let when = std::time::SystemTime::now();
+        let done = recycle_with(std::slice::from_ref(&victim), FOF_NO_UI).unwrap();
+        println!("recycle -> {done:?}");
+        assert_eq!(done.len(), 1);
+        assert!(!victim.exists());
+        let back = crate::restore_from_recycle_bin(&victim, when).unwrap();
+        assert_eq!(std::fs::read_to_string(&back).unwrap(), "precious");
+        assert!(matches!(
+            crate::restore_from_recycle_bin(&victim, when)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        ));
+        // permanent delete: dst None
+        let done = delete_with(&[d.join("to")], FOF_NO_UI).unwrap();
+        assert_eq!(
+            done,
+            vec![OpItem {
+                src: d.join("to"),
+                dst: None,
+                is_dir: true
+            }]
+        );
+        // nothing to restore
+        let gone = d.join("never-recycled.txt");
+        assert!(matches!(
+            crate::restore_from_recycle_bin(&gone, when)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recycle_info_formats() {
+        let path: Vec<u16> = r"C:\x\y.txt".encode_utf16().chain([0]).collect();
+        let ft: u64 = FILETIME_UNIX_EPOCH + 1_700_000_000 * 10_000_000;
+        let mut v2 = Vec::new();
+        v2.extend(2u64.to_le_bytes());
+        v2.extend(5u64.to_le_bytes());
+        v2.extend(ft.to_le_bytes());
+        v2.extend((path.len() as u32).to_le_bytes());
+        path.iter().for_each(|c| v2.extend(c.to_le_bytes()));
+        let want = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert_eq!(
+            parse_recycle_info(&v2),
+            Some((PathBuf::from(r"C:\x\y.txt"), want))
+        );
+        let mut v1 = Vec::new();
+        v1.extend(1u64.to_le_bytes());
+        v1.extend(5u64.to_le_bytes());
+        v1.extend(ft.to_le_bytes());
+        let mut fixed = path.clone();
+        fixed.resize(260, 0);
+        fixed.iter().for_each(|c| v1.extend(c.to_le_bytes()));
+        assert_eq!(
+            parse_recycle_info(&v1),
+            Some((PathBuf::from(r"C:\x\y.txt"), want))
+        );
+        assert_eq!(parse_recycle_info(&v2[..20]), None);
+        assert_eq!(
+            recycle_info_path(Path::new(r"C:\$Recycle.Bin\S-1\$RAB12.txt")),
+            Some(PathBuf::from(r"C:\$Recycle.Bin\S-1\$IAB12.txt"))
+        );
     }
 
     #[test]

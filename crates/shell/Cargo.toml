@@ -20,6 +20,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 # 0.61: the same windows crate GPUI 0.2.2 uses, so it is built only once.
 [target.'cfg(windows)'.dependencies]
+# already in the tree through `windows`; #[implement] (COM callbacks) names it directly
+windows-core = "0.61"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

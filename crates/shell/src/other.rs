@@ -3,8 +3,9 @@
 //! native context menu.
 
 use crate::{
-    Drive, Handler, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, NewItem, RgbaImage,
-    classify_target, copy_tree, create_numbered, free_copy_name, is_within, new_base_name,
+    Drive, Handler, KnownFolder, KnownFolderKind, LinkTarget, MenuAction, NewItem, OpItem,
+    RgbaImage, classify_target, copy_tree, create_numbered, free_copy_name, is_within,
+    new_base_name,
 };
 use std::io;
 use std::path::{Path, PathBuf};
@@ -178,7 +179,7 @@ fn remove(p: &Path) -> io::Result<()> {
     }
 }
 
-pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
+pub fn recycle(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
     let trash = trash_dir()?;
     let files = if cfg!(target_os = "macos") {
         trash.clone()
@@ -190,6 +191,7 @@ pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
     if !cfg!(target_os = "macos") {
         std::fs::create_dir_all(&info)?;
     }
+    let mut done = Vec::new();
     for p in paths {
         let abs = std::path::absolute(p)?;
         let name = abs
@@ -207,16 +209,124 @@ pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
             );
             std::fs::write(info.join(format!("{free}.trashinfo")), body)?;
         }
+        let is_dir = abs.is_dir();
         if let Err(e) = move_across(&abs, &files.join(&free)) {
             let _ = std::fs::remove_file(info.join(format!("{free}.trashinfo")));
-            return Err(e);
+            return partial(done, e);
         }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: Some(files.join(&free)),
+            is_dir,
+        });
     }
-    Ok(())
+    Ok(done)
 }
 
-pub fn delete(paths: &[PathBuf]) -> io::Result<()> {
-    paths.iter().try_for_each(|p| remove(p))
+/// Items done before an error count as the result; the error only when none.
+fn partial(done: Vec<OpItem>, e: io::Error) -> io::Result<Vec<OpItem>> {
+    if done.is_empty() { Err(e) } else { Ok(done) }
+}
+
+pub fn delete(paths: &[PathBuf]) -> io::Result<Vec<OpItem>> {
+    let mut done = Vec::new();
+    for p in paths {
+        let is_dir = p.is_dir();
+        if let Err(e) = remove(p) {
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: None,
+            is_dir,
+        });
+    }
+    Ok(done)
+}
+
+/// Parses a .trashinfo body: (decoded Path=, DeletionDate as UTC).
+fn parse_trashinfo(body: &str) -> Option<(PathBuf, std::time::SystemTime)> {
+    let mut path = None;
+    let mut date = None;
+    for line in body.lines() {
+        if let Some(v) = line.strip_prefix("Path=") {
+            path = Some(trash_decode(v)?);
+        } else if let Some(v) = line.strip_prefix("DeletionDate=") {
+            date = parse_iso(v);
+        }
+    }
+    Some((path?, date?))
+}
+
+fn trash_decode(s: &str) -> Option<PathBuf> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        if c == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(out).ok().map(PathBuf::from)
+    }
+}
+
+/// "YYYY-MM-DDTHH:MM:SS" (as written by now_iso) to a SystemTime.
+fn parse_iso(s: &str) -> Option<std::time::SystemTime> {
+    let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    // days from civil (Howard Hinnant)
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+pub fn restore_from_recycle_bin(
+    original: &Path,
+    near: std::time::SystemTime,
+) -> io::Result<PathBuf> {
+    let trash = trash_dir()?;
+    let not_found = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{}: not in the trash", original.display()),
+        )
+    };
+    let info = trash.join("info");
+    let entries = std::fs::read_dir(&info).map_err(|_| not_found())?;
+    let candidates = entries.flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let stem = name.strip_suffix(".trashinfo")?.to_owned();
+        let (orig, when) = parse_trashinfo(&std::fs::read_to_string(e.path()).ok()?)?;
+        Some((stem, orig, when))
+    });
+    let abs = std::path::absolute(original)?;
+    let stem = crate::nearest_deleted(candidates, &abs, near).ok_or_else(not_found)?;
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    move_across(&trash.join("files").join(&stem), &abs)?;
+    let _ = std::fs::remove_file(info.join(format!("{stem}.trashinfo")));
+    Ok(abs)
 }
 
 fn name_of(p: &Path) -> io::Result<String> {
@@ -230,7 +340,8 @@ fn name_of(p: &Path) -> io::Result<String> {
         })
 }
 
-pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
+    let mut done = Vec::new();
     for p in paths {
         let is_dir = p.is_dir();
         if is_dir && is_within(dest, p) {
@@ -242,12 +353,21 @@ pub fn copy(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
         let name = free_copy_name(&name_of(p)?, is_dir, |n| {
             dest.join(n).symlink_metadata().is_ok()
         });
-        copy_tree(p, &dest.join(name))?;
+        let to = dest.join(name);
+        if let Err(e) = copy_tree(p, &to) {
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: Some(to),
+            is_dir,
+        });
     }
-    Ok(())
+    Ok(done)
 }
 
-pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
+pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<Vec<OpItem>> {
+    let mut done = Vec::new();
     for p in paths {
         let is_dir = p.is_dir();
         if is_dir && is_within(dest, p) {
@@ -260,9 +380,17 @@ pub fn move_(paths: &[PathBuf], dest: &Path) -> io::Result<()> {
         let name = free_copy_name(&name_of(p)?, is_dir, |n| {
             dest.join(n).symlink_metadata().is_ok()
         });
-        move_across(p, &dest.join(name))?;
+        let to = dest.join(name);
+        if let Err(e) = move_across(p, &to) {
+            return partial(done, e);
+        }
+        done.push(OpItem {
+            src: p.clone(),
+            dst: Some(to),
+            is_dir,
+        });
     }
-    Ok(())
+    Ok(done)
 }
 
 pub fn drives() -> Vec<Drive> {
@@ -494,6 +622,28 @@ pub fn thumbnail(path: &Path, size: u32) -> Option<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trashinfo_round_trip() {
+        let body = format!(
+            "[Trash Info]\nPath={}\nDeletionDate={}\n",
+            trash_encode(Path::new("/tmp/a b/ü.txt")),
+            now_iso()
+        );
+        let (p, when) = parse_trashinfo(&body).unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/a b/ü.txt"));
+        let d = crate::secs_apart(when, std::time::SystemTime::now());
+        assert!(d < 5.0, "{d}");
+        assert_eq!(
+            parse_iso("1970-01-02T00:00:10"),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_410))
+        );
+        assert_eq!(
+            parse_iso("2024-03-01T00:00:00"),
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_709_251_200))
+        );
+        assert!(parse_trashinfo("[Trash Info]\nPath=%zz\n").is_none());
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("grids_other_{tag}_{}", std::process::id()));
