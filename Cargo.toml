@@ -1,84 +1,54 @@
 [package]
 name = "grids"
-version = "0.7.6"
-edition = "2021"
-description = "Fast multi-pane file manager for Windows"
+version = "0.8.0"
+edition = "2024"
+description = "Fast multi-pane file manager, drawn with GPUI"
 license = "MIT"
-repository = "https://github.com/efww/grids"
+repository = "https://github.com/Joyi-code/grids"
 publish = false
 
-[dependencies.windows]
-version = "0.62"
-features = [
-    "Data_Pdf",
-    "Foundation",
-    "Storage",
-    "Storage_Streams",
-    "Win32_Foundation",
-    "Win32_Globalization",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_Graphics_Imaging",
-    "Win32_Networking_WinHttp",
-    "Win32_Security",
-    "Win32_Security_Cryptography",
-    "Win32_Storage_EnhancedStorage",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_DataExchange",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_System_Ole",
-    "Win32_System_Registry",
-    "Win32_System_RestartManager",
-    "Win32_System_SystemInformation",
-    "Win32_System_SystemServices",
-    "Win32_System_Threading",
-    "Win32_System_Time",
-    "Win32_System_Variant",
-    "Win32_UI_Accessibility",
-    "Win32_UI_Controls",
-    "Win32_UI_Controls_Dialogs",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
-    "Win32_UI_Shell_PropertiesSystem",
-    "Win32_UI_WindowsAndMessaging",
-]
+[workspace]
+members = ["crates/core", "crates/shell"]
+default-members = [".", "crates/core", "crates/shell"]
 
-# batch rename's regular expressions: the small pure-Rust one, no Unicode tables
-[dependencies.regex-lite]
-version = "0.1"
+[dependencies]
+grids_core = { path = "crates/core" }
+grids_shell = { path = "crates/shell" }
+anyhow = "1.0.104"
+gpui = "0.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+log = "0.4"
+sys-locale = "0.3.2"
 
-[dependencies.windows-core]
-version = "0.62"
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
-# inflate for ZIP-based documents in the preview (docx, xlsx, pptx, hwpx, odt): pure Rust, no C
-[dependencies.miniz_oxide]
-version = "0.8"
-default-features = false
-features = ["with-alloc"]
+[build-dependencies]
 
-# HWP/HWPX pages in the preview (hwpdoc.rs): the rhwp document engine, without its PDF import and JS facade
-[dependencies.rhwp]
-version = "=0.9.0"
-default-features = false
+# GPUI 0.2.2 and taffy 0.9.0 with quiet-md's local patches (see vendor/PATCHES.md).
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
+taffy = { path = "vendor/taffy" }
+xattr = { path = "vendor/xattr" }
 
-# the same font list rhwp loads, to find fonts it would pick by name but cannot draw (hwpdoc.rs)
-[dependencies.fontdb]
-version = "0.23"
-default-features = false
-features = ["std", "fs", "memmap"]
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
-[dependencies.ttf-parser]
-version = "0.25"
+[workspace.lints.clippy]
+type_complexity = "allow"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+large_enum_variant = "allow"
+field_reassign_with_default = "allow"
+
+[lints]
+workspace = true
 
 [profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-panic = "unwind" # rhwp runs behind catch_unwind: a document it trips on must not close the window
+opt-level = 3
+lto = "thin"
+codegen-units = 4
 strip = true
