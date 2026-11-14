@@ -48,9 +48,22 @@ pub fn window_background() -> WindowBackgroundAppearance {
 static DARK: AtomicBool = AtomicBool::new(false);
 
 static PACK: std::sync::OnceLock<grids_core::theme_pack::ThemePack> = std::sync::OnceLock::new();
+static PACK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 /// Applies a theme pack for this run; call before the window opens.
-pub fn set_pack(pack: grids_core::theme_pack::ThemePack) { let _ = PACK.set(pack); }
+pub fn set_pack(pack: grids_core::theme_pack::ThemePack, dir: std::path::PathBuf) {
+    let _ = PACK_DIR.set(dir);
+    let _ = PACK.set(pack);
+}
+
+/// True when a theme pack is active.
+pub fn active() -> bool { PACK.get().is_some() }
+
+/// The active pack's folder.
+pub fn dir() -> Option<&'static std::path::Path> { PACK_DIR.get().map(|p| p.as_path()) }
+
+/// Whether the pack ships `rel` (e.g. `types/folder.svg`).
+pub fn has(rel: &str) -> bool { dir().is_some_and(|d| d.join(rel).is_file()) }
 
 /// A colour from the active pack for the current mode.
 fn packed(f: impl Fn(&grids_core::theme_pack::Palette) -> Option<grids_core::theme_pack::Rgba>) -> Option<Hsla> {
@@ -360,6 +373,7 @@ pub fn kind_icon(k: grids_core::FileKind) -> &'static str {
         Other => "file",
     }
 }
+
 
 
 

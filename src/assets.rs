@@ -42,8 +42,12 @@ impl Assets {
             }
             return None
         }
-        let name = path.strip_prefix("icons/")?;
-        std::fs::read(dir.join("icons").join(name)).ok().map(std::borrow::Cow::Owned)
+        if let Some(name) = path.strip_prefix("theme/") {
+            return std::fs::read(dir.join(name)).ok().map(std::borrow::Cow::Owned)
+        }
+        let name = path.strip_prefix("icons/").or_else(|| path.strip_prefix("types/"))?;
+        let sub = if path.starts_with("types/") { "types" } else { "icons" };
+        std::fs::read(dir.join(sub).join(name)).ok().map(std::borrow::Cow::Owned)
     }
 }
 

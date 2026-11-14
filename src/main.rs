@@ -33,7 +33,7 @@ fn main() {
     let theme_dir = std::env::var_os("GRIDS_THEME").map(std::path::PathBuf::from).or_else(|| config.theme.clone());
     if let Some(dir) = &theme_dir {
         match grids_core::theme_pack::load(dir) {
-            Ok(pack) => theme::set_pack(pack),
+            Ok(pack) => theme::set_pack(pack, dir.clone()),
             Err(e) => log::warn!("theme: {e}"),
         }
     }

@@ -1405,6 +1405,26 @@ struct Grid {
     icon: f32,
 }
 
+/// The theme pack's PNG icon for a file type, when it ships one.
+fn type_img(kind: grids_core::FileKind, dark: bool) -> Option<SharedString> {
+    use grids_core::FileKind::*;
+    let name = match kind {
+        Folder => "folder",
+        Image => "file-image",
+        Video => "file-video",
+        Audio => "file-audio",
+        Archive => "file-archive",
+        Code => "file-code",
+        Text | Word | Pdf => "file-text",
+        Sheet => "file-spreadsheet",
+        Slides => "presentation",
+        App => "app-window",
+        Other => "file",
+    };
+    let rel = if dark { format!("types/{name}-dark.png") } else { format!("types/{name}.png") };
+    theme::has(&rel).then(|| SharedString::from(rel))
+}
+
 fn grid_metrics(view: ViewMode, avail: f32) -> Option<Grid> {
     // (picture edge, narrowest cell, cell height)
     let (icon, min_w, cell_h) = match view {
@@ -1787,9 +1807,12 @@ impl PaneView {
         let rename_box = |rn: &RenameState| div().w_full().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone());
         if g.icon <= ICON {
             // List: small icon and one line of name.
-            let glyph = match state::file_icon(&e.path, e.is_dir, &e.ext, cx) {
-                Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
-                None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
+            let glyph = match type_img(kind, theme::dark()) {
+                Some(path) => img(path).size(px(ICON)).object_fit(ObjectFit::Contain).flex_none().into_any_element(),
+                None => match state::file_icon(&e.path, e.is_dir, &e.ext, cx) {
+                    Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
+                    None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
+                },
             };
             let inner = hl(div().size_full().rounded(px(ROW_R)).pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)))
                 .child(glyph)
@@ -1837,9 +1860,12 @@ impl PaneView {
         let kind = e.kind();
         let renaming = self.rename.as_ref().filter(|rn| rn.path == e.path);
         let sys_icon = state::file_icon(&e.path, e.is_dir, &e.ext, cx);
-        let glyph = match sys_icon {
-            Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
-            None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
+        let glyph = match type_img(kind, theme::dark()) {
+            Some(path) => img(path).size(px(ICON)).object_fit(ObjectFit::Contain).flex_none().into_any_element(),
+            None => match sys_icon {
+                Some(image) => img(image).size(px(ICON)).flex_none().into_any_element(),
+                None => icon(theme::kind_icon(kind), ICON, theme::kind_color(kind)).into_any_element(),
+            },
         };
         let name_cell = div().flex_none().w(px(widths[0])).h_full().pl(px(CELL_PAD - 2.)).pr(px(CELL_PAD)).flex().items_center().gap(px(9.)).child(glyph).map(|d| match renaming {
             Some(rn) => d.child(div().flex_1().min_w_0().h(px(24.)).px(px(4.)).rounded(px(5.)).bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).flex().items_center().child(rn.input.clone())),
@@ -1928,8 +1954,17 @@ impl Render for PaneView {
         let locked = state::locked_root(cx, &self.state.path);
         if locked.is_some() { list = list.opacity(0.5) }
         let list_bounds = self.list_bounds.clone();
-        let empty_msg: Option<String> = if let Some(err) = &self.state.error { Some(err.clone()) } else if n == 0 && !self.loading {
-            Some(if !self.state.filter.is_empty() { if en { "No matching items." } else { "没有匹配的项目。" } } else if en { "This folder is empty." } else { "此文件夹为空。" }.to_string())
+        let empty: Option<AnyElement> = if let Some(err) = &self.state.error {
+            Some(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(err.clone()).into_any_element())
+        } else if n == 0 && !self.loading {
+            let msg = if !self.state.filter.is_empty() { if en { "No matching items." } else { "没有匹配的项目。" } } else if en { "This folder is empty." } else { "此文件夹为空。" }.to_string();
+            let art = if self.state.filter.is_empty() {
+                let name = if theme::dark() && theme::has("empty-dark-2x.png") { "theme/empty-dark-2x.png" } else { "theme/empty-2x.png" };
+                theme::has(name.trim_start_matches("theme/")).then(|| img(name).w(px(180.)).h(px(120.)).object_fit(ObjectFit::Contain).into_any_element())
+            } else { None };
+            Some(div().absolute().inset_0().flex().flex_col().items_center().justify_center().gap(px(10.)).px(px(12.))
+                .children(art)
+                .child(div().text_color(Theme::text_caption()).child(msg)).into_any_element())
         } else { None };
         let missing = self.link.as_ref().and_then(|l| l.missing.clone()).map(|m| {
             div().absolute().inset_0().bg(Theme::bg_body()).flex().flex_col().items_center().justify_center().gap(px(10.)).px(px(16.))
@@ -1992,7 +2027,7 @@ impl Render for PaneView {
             .child(list)
             .children(marquee_box)
             .children(lock_veil)
-            .when_some(empty_msg, |d, msg| d.child(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(msg)))
+            .children(empty)
             .children(missing)
             .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(Theme::drop_target()))
             .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(Theme::drop_target()))
@@ -2145,4 +2180,5 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
 
