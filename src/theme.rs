@@ -57,10 +57,11 @@ include!(concat!(env!("OUT_DIR"), "/bundled_theme.rs"));
 pub fn install_bundled(dir: &std::path::Path) -> bool {
     let themes = dir.join("themes");
     let mut wrote = false;
+    // Every file that is missing gets written: a half-copied pack repairs
+    // itself, and nothing that already exists is ever overwritten.
     for (rel, bytes) in THEME_FILES {
-        let Some((pack, rest)) = rel.split_once('/') else { continue };
-        if themes.join(pack).join("theme.json").is_file() { continue }
-        let p = themes.join(pack).join(rest);
+        let p = themes.join(rel);
+        if p.is_file() { continue }
         if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
         if std::fs::write(&p, bytes).is_ok() { wrote = true }
     }

@@ -92,6 +92,8 @@ licence obligation, not tracking upstream.
   imperative line with a layer prefix: `core:`, `shell:`, `CI:`, `U<n>:` for a
   numbered feature step, or `Version X.Y.Z` for a version commit. Add a body
   only when it explains a non-obvious cause.
+- The version stays in the 0.9 line: 0.9.8, 0.9.9, 0.9.10, and so on. Never
+  move to 1.0.0 unless the user asks for it.
 - Runtime state – `grids-gpui.json`, `grids-journal.jsonl`, `sessions/` – is
   written next to the exe and is gitignored. Never commit it, and never commit a
   path or fixture that only exists on your machine.
