@@ -100,5 +100,7 @@ OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+github.svg is the GitHub mark, used only to link to the project's GitHub page.
+
 Other Rust dependencies are pulled from crates.io under their own licences
 (listed in `Cargo.lock`).

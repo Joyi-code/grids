@@ -19,7 +19,7 @@ static FILES: &[(&str, &[u8])] = icons![
     "star-fill", "sun", "sun-moon", "trash-2", "x", "star-off", "folder-search", "square-split-horizontal", "link", "info",
     "terminal", "list", "layout-list", "grid-2x2", "lock", "lock-open", "inbox", "folder-input", "sticky-note",
     "calendar-clock", "locate", "history", "text-cursor-input", "list-checks", "table-2", "arrow-right-left",
-    "unlink", "git-compare", "folder-x", "undo-2", "shield-alert", "file-lock", "power", "octagon-x",
+    "unlink", "git-compare", "folder-x", "undo-2", "shield-alert", "file-lock", "power", "octagon-x", "github",
 ];
 
 /// The app icon, drawn beside "Grids" in the sidebar (48px, shown at 20).

@@ -840,22 +840,9 @@ impl Workspace {
             )
             .child(div().h(px(9.)).flex().items_center().mx(px(12.)).child(div().h(px(1.)).flex_1().bg(Theme::line_divider())))
             .child(
-                div().id("version-licences").h(px(30.)).mx(px(4.)).pl(px(8.)).pr(px(10.)).rounded(px(6.)).flex().items_center().cursor_pointer()
-                    .hover(|s| s.bg(Theme::fill_hover_strong())).active(|s| s.bg(Theme::fill_pressed()))
-                    .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(8.)).child(icon("file-text", 16., Theme::icon())))
-                    .child(div().flex_1().child(tr(cx, "许可证与第三方声明", "Licence and third-party notices")))
-                    .child(icon("chevron-right", 14., Theme::icon_muted()))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.version_pop = false;
-                        this.about = Some(0);
-                        this.about_focus.focus(window);
-                        cx.notify();
-                    })),
-            )
-            .child(
                 div().id("version-project").h(px(30.)).mx(px(4.)).pl(px(8.)).pr(px(10.)).rounded(px(6.)).flex().items_center().cursor_pointer()
                     .hover(|s| s.bg(Theme::fill_hover_strong())).active(|s| s.bg(Theme::fill_pressed()))
-                    .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(8.)).child(icon("link", 15., Theme::icon())))
+                    .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(8.)).child(icon("github", 15., Theme::icon())))
                     .child(div().flex_1().child(tr(cx, "项目主页与更新说明", "Project page and release notes")))
                     .child(icon("chevron-right", 14., Theme::icon_muted()))
                     .on_click(|_, _, _| { let _ = grids_shell::open_url(PROJECT_PAGE); }),
