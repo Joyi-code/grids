@@ -175,6 +175,14 @@ pub struct Workspace {
     _subs: Vec<Subscription>,
 }
 
+/// "正在下载 42%" (or bytes while the size is unknown).
+fn download_label(got: u64, total: u64, en: bool) -> String {
+    let mb = got as f64 / 1_048_576.0;
+    if total == 0 { return if en { format!("Downloading {mb:.1} MB") } else { format!("正在下载 {mb:.1} MB") } }
+    let pct = (got.min(total) * 100 / total) as u32;
+    if en { format!("Downloading {pct}%") } else { format!("正在下载 {pct}%") }
+}
+
 /// Where the update check stands.
 #[derive(Clone, PartialEq)]
 enum UpdateState {
@@ -182,7 +190,7 @@ enum UpdateState {
     Checking,
     Current,
     Newer(version::Release),
-    Downloading,
+    Downloading { got: u64, total: u64 },
     Failed,
 }
 
@@ -215,6 +223,14 @@ fn theme_packs(cx: &App) -> Vec<(String, PathBuf)> {
         let name = grids_core::theme_pack::load(dir).map(|p| p.name).unwrap_or_else(|_| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         out.push((name, dir.clone()));
     }
+    // One chip per theme name even when the folder holds copies of a pack; the
+    // active one wins.
+    let active = shared.config.theme.clone();
+    let mut seen = std::collections::HashSet::new();
+    for (name, path) in &out {
+        if active.as_ref() == Some(path) { seen.insert(name.to_lowercase()); }
+    }
+    out.retain(|(name, path)| active.as_ref() == Some(path) || seen.insert(name.to_lowercase()));
     out
 }
 
@@ -731,10 +747,10 @@ impl Workspace {
     fn update_pill(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let label = match &self.update {
             UpdateState::Newer(r) => if state::en(cx) { format!("Update to {}", r.version) } else { format!("更新到 {}", r.version) },
-            UpdateState::Downloading => if state::en(cx) { "Downloading…".to_string() } else { "正在下载…".to_string() },
+            UpdateState::Downloading { got, total } => download_label(*got, *total, state::en(cx)),
             _ => return None,
         };
-        let busy = self.update == UpdateState::Downloading;
+        let busy = matches!(self.update, UpdateState::Downloading { .. });
         Some(
             div().id("update-pill").h(px(28.)).px(px(8.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .bg(Theme::primary().alpha(0.12)).text_color(Theme::primary()).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
@@ -755,7 +771,7 @@ impl Workspace {
             UpdateState::Checking => (if en { "Checking…".to_string() } else { "正在检查…".to_string() }, false),
             UpdateState::Current => (if en { "Up to date".to_string() } else { "已是最新版本".to_string() }, false),
             UpdateState::Newer(r) => (if en { format!("Update to {}", r.version) } else { format!("更新到 {}", r.version) }, true),
-            UpdateState::Downloading => (if en { "Downloading…".to_string() } else { "正在下载…".to_string() }, false),
+            UpdateState::Downloading { got, total } => (download_label(*got, *total, en), false),
             UpdateState::Failed => (if en { "Check failed, click to retry".to_string() } else { "检查失败，点击重试".to_string() }, true),
         };
         let retry = self.update == UpdateState::Idle || self.update == UpdateState::Failed;
@@ -805,11 +821,16 @@ impl Workspace {
 
     fn theme_row(&self, name: String, path: Option<PathBuf>, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = SharedString::from(format!("theme-{name}"));
-        div().id(id).h(px(26.)).px(px(8.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
-            .hover(|s| s.bg(Theme::fill_hover()))
-            .when(selected, |d| d.bg(Theme::fill_hover_strong()))
-            .child(icon(if selected { "check" } else { "square" }, 13., if selected { Theme::primary() } else { Theme::icon_muted() }))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
+        div().id(id).h(px(26.)).pl(px(8.)).pr(px(11.)).rounded(px(13.)).flex().items_center().gap(px(6.)).cursor_pointer()
+            .when(selected, |d| d.bg(Theme::primary().alpha(0.12)))
+            .when(!selected, |d| d.bg(Theme::fill_hover()).hover(|s| s.bg(Theme::fill_hover_strong())))
+            // A radio dot, not a checkbox tick.
+            .child(div().size(px(12.)).rounded_full().border_1()
+                .border_color(if selected { Theme::primary() } else { Theme::icon_muted() })
+                .flex().items_center().justify_center()
+                .children(selected.then(|| div().size(px(6.)).rounded_full().bg(Theme::primary()))))
+            .child(div().text_size(px(12.)).whitespace_nowrap()
+                .text_color(if selected { Theme::primary() } else { Theme::text() }).child(name))
             .on_click(cx.listener(move |this, _, _, cx| this.apply_theme_pack(path.clone(), cx)))
             .into_any_element()
     }
@@ -856,15 +877,31 @@ impl Workspace {
     fn start_update(&mut self, cx: &mut Context<Self>) {
         let UpdateState::Newer(release) = self.update.clone() else { return };
         let dir = state::shared(cx).config_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        self.update = UpdateState::Downloading;
+        let dest = dir.join(format!("grids-update-{}.exe", release.version));
+        self.update = UpdateState::Downloading { got: 0, total: release.size };
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let (rel, dir) = (release.clone(), dir.clone());
-            let dest = dir.join(format!("grids-update-{}.exe", rel.version));
-            let (dest2, rel2) = (dest.clone(), rel.clone());
-            let ok = cx.background_executor().spawn(async move {
-                crate::update::download(&rel2.url, &dest2) && crate::update::verify(&dest2, &rel2.digest)
-            }).await;
+
+        let done = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
+        {
+            let (dest, url, done) = (dest.clone(), release.url.clone(), done.clone());
+            std::thread::spawn(move || {
+                let ok = crate::update::download(&url, &dest);
+                *done.lock().unwrap() = Some(ok);
+            });
+        }
+
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+            let finished = *done.lock().unwrap();
+            let got = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+            if finished.is_none() {
+                let _ = this.update(cx, |this, cx| {
+                    this.update = UpdateState::Downloading { got, total: release.size };
+                    cx.notify();
+                });
+                continue;
+            }
+            let ok = finished == Some(true) && crate::update::verify(&dest, &release.digest);
             let _ = this.update(cx, |this, cx| {
                 if !ok {
                     this.update = UpdateState::Newer(release);
@@ -877,6 +914,7 @@ impl Workspace {
                     this.show_toast(tr(cx, "无法启动更新程序", "Could not start the updater").into(), cx);
                 }
             });
+            break;
         }).detach();
     }
 
@@ -963,7 +1001,7 @@ impl Workspace {
                     .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string())),
             )
             .child(div().px(px(14.)).pt(px(4.)).pb(px(2.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr(cx, "主题", "Theme")))
-            .child(div().px(px(8.)).flex().flex_col().gap(px(1.)).children(self.theme_rows(cx)))
+            .child(div().px(px(10.)).pb(px(2.)).flex().flex_wrap().gap(px(6.)).children(self.theme_rows(cx)))
             .child(div().px(px(14.)).pt(px(8.)).pb(px(2.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr(cx, "外观", "Appearance")))
             .child(div().px(px(14.)).pb(px(6.)).child(self.appearance_row(cx)))
             .child(
