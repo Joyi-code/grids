@@ -16,6 +16,7 @@ pub mod notes;
 pub mod pane;
 pub mod paths;
 pub mod session;
+pub mod theme_pack;
 pub mod today;
 pub mod version;
 

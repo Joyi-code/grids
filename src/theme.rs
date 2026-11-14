@@ -46,6 +46,21 @@ pub fn window_background() -> WindowBackgroundAppearance {
 }
 
 static DARK: AtomicBool = AtomicBool::new(false);
+
+static PACK: std::sync::OnceLock<grids_core::theme_pack::ThemePack> = std::sync::OnceLock::new();
+
+/// Applies a theme pack for this run; call before the window opens.
+pub fn set_pack(pack: grids_core::theme_pack::ThemePack) { let _ = PACK.set(pack); }
+
+/// The loaded pack's name, if any.
+pub fn pack_name() -> Option<&'static str> { PACK.get().map(|p| p.name.as_str()) }
+
+/// A colour from the active pack for the current mode.
+fn packed(f: impl Fn(&grids_core::theme_pack::Palette) -> Option<grids_core::theme_pack::Rgba>) -> Option<Hsla> {
+    let p = PACK.get()?;
+    let pal = if dark() { &p.dark } else { &p.light };
+    f(pal).map(|c| rgbaf(c.r, c.g, c.b, c.a as f32 / 255.))
+}
 thread_local! {
     static ADAPTED: std::cell::RefCell<std::collections::HashMap<[u32; 4], Hsla>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
@@ -257,16 +272,16 @@ pub const UI_SMALL: f32 = 12.;
 pub struct Theme;
 
 impl Theme {
-    pub fn text() -> Hsla { c(craft::N900) }
+    pub fn text() -> Hsla { packed(|p| p.text).unwrap_or_else(|| c(craft::N900)) }
     /// Secondary text: dates, meta, captions of controls.
-    pub fn text_caption() -> Hsla { c(craft::N600) }
+    pub fn text_caption() -> Hsla { packed(|p| p.text_caption).unwrap_or_else(|| c(craft::N600)) }
     pub fn text_placeholder() -> Hsla { c(craft::N500) }
     pub fn text_disabled() -> Hsla { ca(craft::N900, 0.3) }
-    pub fn primary() -> Hsla { c(craft::B500) }
+    pub fn primary() -> Hsla { packed(|p| p.accent).unwrap_or_else(|| c(craft::B500)) }
     /// Content planes: white.
-    pub fn bg_body() -> Hsla { if dark() { rgb(0x151517).into() } else { c(craft::N00) } }
-    pub fn line_divider() -> Hsla { ca(craft::N1000, 0.06) }
-    pub fn line_border() -> Hsla { ca(craft::N1000, 0.08) }
+    pub fn bg_body() -> Hsla { packed(|p| p.surface).unwrap_or_else(|| if dark() { rgb(0x151517).into() } else { c(craft::N00) }) }
+    pub fn line_divider() -> Hsla { packed(|p| p.line).map(|c| c.opacity(0.7)).unwrap_or_else(|| ca(craft::N1000, 0.06)) }
+    pub fn line_border() -> Hsla { packed(|p| p.line).unwrap_or_else(|| ca(craft::N1000, 0.08)) }
     pub fn fill_hover() -> Hsla { ca(craft::N1000, 0.045) }
     pub fn fill_hover_strong() -> Hsla { ca(craft::N1000, 0.06) }
     pub fn fill_pressed() -> Hsla { ca(craft::N1000, 0.09) }
@@ -278,12 +293,12 @@ impl Theme {
     pub fn caret() -> Hsla { c(craft::B500) }
     pub fn star() -> Hsla { c(0xf5a524) }
     /// The window surface: the sidebar material behind the content.
-    pub fn window() -> Hsla { if dark() { rgb(0x1b1b1c).into() } else { c(craft::WINDOW) } }
+    pub fn window() -> Hsla { packed(|p| p.background).unwrap_or_else(|| if dark() { rgb(0x1b1b1c).into() } else { c(craft::WINDOW) }) }
     /// Sidebar section titles.
     pub fn sidebar_section() -> Hsla { c(0x333739) }
     pub fn sidebar_text() -> Hsla { ca(craft::N900, 0.85) }
-    pub fn sidebar_hover() -> Hsla { ca(craft::N1000, 0.035) }
-    pub fn sidebar_selected() -> Hsla { ca(craft::N1000, 0.05) }
+    pub fn sidebar_hover() -> Hsla { packed(|p| p.hover).unwrap_or_else(|| ca(craft::N1000, 0.035)) }
+    pub fn sidebar_selected() -> Hsla { packed(|p| p.selection).unwrap_or_else(|| ca(craft::N1000, 0.05)) }
     /// Monochrome icons.
     pub fn icon() -> Hsla { if dark() { ca(craft::N900, 0.6) } else { rgb(0x191919).into() } }
     pub fn icon_muted() -> Hsla { c(craft::N500) }
@@ -296,11 +311,11 @@ impl Theme {
     pub fn drop_target() -> Hsla { ca(craft::B500, 0.10) }
     /// Destructive actions (the delete button): a firm red, softer and less
     /// saturated on the dark page.
-    pub fn danger() -> Hsla { if dark() { rgb(0xc4574f).into() } else { rgb(0xd92d20).into() } }
+    pub fn danger() -> Hsla { packed(|p| p.danger).unwrap_or_else(|| if dark() { rgb(0xc4574f).into() } else { rgb(0xd92d20).into() }) }
     pub fn danger_hover() -> Hsla { if dark() { rgb(0xb24c45).into() } else { rgb(0xc0261a).into() } }
     /// Compare: only on this side (green) / same name, differs (amber).
-    pub fn added() -> Hsla { if dark() { rgb(0x4fb477).into() } else { rgb(0x16a34a).into() } }
-    pub fn changed() -> Hsla { if dark() { rgb(0xd9a441).into() } else { rgb(0xd97706).into() } }
+    pub fn added() -> Hsla { packed(|p| p.added).unwrap_or_else(|| if dark() { rgb(0x4fb477).into() } else { rgb(0x16a34a).into() }) }
+    pub fn changed() -> Hsla { packed(|p| p.changed).unwrap_or_else(|| if dark() { rgb(0xd9a441).into() } else { rgb(0xd97706).into() }) }
     /// Link-group dot colours (blue, violet, teal, rose).
     pub fn link(i: usize) -> Hsla {
         let lt = [0x2f6fed, 0x8b5cf6, 0x0d9488, 0xe11d74];

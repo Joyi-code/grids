@@ -164,3 +164,7 @@ Grids is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which was 
 ## License
 
 [MIT](LICENSE)
+
+## Theme packs
+
+A theme is a folder with a `theme.json` (a light and a dark palette) plus `icons/` and `app.png`. Point `"theme"` in `grids-gpui.json` at it, or start the app with `GRIDS_THEME` set; Grids then uses its colours, toolbar icons and sidebar badge, falling back to the built-in ones for anything the pack leaves out. The version popover shows the active theme's name. The pack is read at startup, so restart to switch.

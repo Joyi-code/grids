@@ -835,6 +835,7 @@ impl Workspace {
             .child(
                 div().px(px(14.)).pb(px(6.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
                     .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string()))
+                    .when_some(theme::pack_name().map(str::to_string), |d, name| d.child(row(tr(cx, "主题", "Theme"), name)))
                     .child(self.update_row(cx))
                     .child(self.check_updates_toggle(cx)),
             )
