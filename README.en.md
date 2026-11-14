@@ -4,7 +4,7 @@
 
 A multi-pane file manager for Windows. One window holds up to sixteen panes; changes highlight as they happen, a folder can be locked read-only, two folders can be compared side by side, and files can be collected on a shelf before they are moved.
 
-The whole interface is drawn by the program itself (GPUI, the Rust UI framework behind Zed); no Explorer view is embedded. The app is a single exe with the themes compiled in, written out on first run.
+The whole interface is drawn by the program itself (a Rust UI framework, GPUI); no Explorer view is embedded. The app is a single exe with the themes compiled in, written out on first run.
 
 ![Four panes and the sidebar](docs/screenshots/0.9.9/overview.png)
 
@@ -200,7 +200,7 @@ Say what you are writing about before adding the contact.
 
 ## Credits
 
-PaneBoard is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which took its cue from [Q-Dir](https://www.softwareok.com/?seite=Freeware/Q-Dir). The rewrite is built on [GPUI](https://www.gpui.rs). Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
+PaneBoard is a fork of [efww/grids](https://github.com/efww/grids) (MIT). The rewrite is built on [GPUI](https://www.gpui.rs). Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Licence
 

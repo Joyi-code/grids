@@ -4,7 +4,7 @@
 
 Windows 多窗格文件管理器。一个窗口最多 16 个窗格，布局随手拖出来；变化实时高亮、目录可以彻底锁住、两个目录能并排核对，窗格之间还能先把文件攒起来再一起搬。
 
-界面全部自绘（GPUI，Zed 用的 Rust UI 框架），不嵌入资源管理器视图。整个程序是一个 exe，主题也打包在里面，第一次运行自动展开。
+界面全部自绘（Rust UI 框架 + GPUI），不嵌入资源管理器视图。整个程序是一个 exe，主题也打包在里面，第一次运行自动展开。
 
 ![四个窗格与侧栏](docs/screenshots/0.9.9/overview.png)
 
@@ -20,7 +20,7 @@ Windows 多窗格文件管理器。一个窗口最多 16 个窗格，布局随�
 - 备份完总要核对两个目录是不是一致，靠肉眼一行行比，费时还容易漏。
 - 跨好几个目录挑文件，只能一个个复制粘贴，中间还要记住自己挑过哪些。
 
-文件看板就是把这些动作收进一个窗口：多格并排、变化高亮、只读锁定、联动对比、暂存架，加上命令面板和撤销，尽量少用鼠标。
+文件看板就是把这些动作收进一个窗口：多格并排、变化高亮、只读锁定、联动对比、暂存架，加上命令面板和撤销。
 
 ## 它能带来什么
 
@@ -206,7 +206,7 @@ build.cmd
 
 ## 致谢
 
-文件看板是 [efww/grids](https://github.com/efww/grids)（MIT）的 fork，上游曾受 [Q-Dir](https://www.softwareok.com/?seite=Freeware/Q-Dir) 启发。本次重写基于 [GPUI](https://www.gpui.rs)。第三方声明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+文件看板是 [efww/grids](https://github.com/efww/grids)（MIT）的 fork。本次重写基于 [GPUI](https://www.gpui.rs)。第三方声明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
 
 ## 许可
 
