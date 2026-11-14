@@ -175,6 +175,27 @@ pub struct Workspace {
     _subs: Vec<Subscription>,
 }
 
+/// A pill with a radio dot, shared by the theme and appearance pickers.
+fn chip_shell(label: String, selected: bool) -> Div {
+    div().h(px(26.)).pl(px(8.)).pr(px(11.)).rounded(px(13.)).flex().items_center().gap(px(6.)).cursor_pointer()
+        .when(selected, |d| d.bg(Theme::primary().alpha(0.12)))
+        .when(!selected, |d| d.bg(Theme::fill_hover()).hover(|s| s.bg(Theme::fill_hover_strong())))
+        .child(div().size(px(12.)).rounded_full().border_1()
+            .border_color(if selected { Theme::primary() } else { Theme::icon_muted() })
+            .flex().items_center().justify_center()
+            .children(selected.then(|| div().size(px(6.)).rounded_full().bg(Theme::primary()))))
+        .child(div().text_size(px(12.)).whitespace_nowrap()
+            .text_color(if selected { Theme::primary() } else { Theme::text() }).child(label))
+}
+
+/// A small on/off switch: pill track, round knob.
+fn switch(on: bool) -> Div {
+    div().w(px(34.)).h(px(19.)).flex_none().rounded_full().px(px(2.)).flex().items_center()
+        .when(on, |d| d.justify_end()).when(!on, |d| d.justify_start())
+        .bg(if on { Theme::primary() } else { Theme::fill_hover_strong() })
+        .child(div().size(px(15.)).rounded_full().bg(gpui::white()))
+}
+
 /// "正在下载 42%" (or bytes while the size is unknown).
 fn download_label(got: u64, total: u64, en: bool) -> String {
     let mb = got as f64 / 1_048_576.0;
@@ -792,13 +813,9 @@ impl Workspace {
     /// Whether to look for a newer release at startup.
     fn check_updates_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let on = state::shared(cx).config.check_updates;
-        div().id("check-updates").h(px(24.)).flex().items_center().gap(px(12.)).cursor_pointer()
-            .child(div().w(px(64.)).flex_none().text_color(Theme::text_caption()).child(tr(cx, "启动时检查", "Check at startup")))
-            .child(
-                div().flex_1().flex().items_center().gap(px(6.)).text_color(if on { Theme::text() } else { Theme::text_caption() })
-                    .child(icon(if on { "check" } else { "minus" }, 13., if on { Theme::primary() } else { Theme::icon_muted() }))
-                    .child(if on { tr(cx, "开启", "On") } else { tr(cx, "关闭", "Off") }),
-            )
+        div().id("check-updates").h(px(26.)).flex().items_center().justify_between().cursor_pointer()
+            .child(div().text_color(Theme::text_caption()).child(tr(cx, "启动时检查", "Check at startup")))
+            .child(switch(on))
             .on_click(cx.listener(|this, _, _, cx| {
                 let on = state::shared(cx).config.check_updates;
                 cx.global_mut::<Shared>().config.check_updates = !on;
@@ -821,16 +838,7 @@ impl Workspace {
 
     fn theme_row(&self, name: String, path: Option<PathBuf>, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let id = SharedString::from(format!("theme-{name}"));
-        div().id(id).h(px(26.)).pl(px(8.)).pr(px(11.)).rounded(px(13.)).flex().items_center().gap(px(6.)).cursor_pointer()
-            .when(selected, |d| d.bg(Theme::primary().alpha(0.12)))
-            .when(!selected, |d| d.bg(Theme::fill_hover()).hover(|s| s.bg(Theme::fill_hover_strong())))
-            // A radio dot, not a checkbox tick.
-            .child(div().size(px(12.)).rounded_full().border_1()
-                .border_color(if selected { Theme::primary() } else { Theme::icon_muted() })
-                .flex().items_center().justify_center()
-                .children(selected.then(|| div().size(px(6.)).rounded_full().bg(Theme::primary()))))
-            .child(div().text_size(px(12.)).whitespace_nowrap()
-                .text_color(if selected { Theme::primary() } else { Theme::text() }).child(name))
+        chip_shell(name, selected).id(id)
             .on_click(cx.listener(move |this, _, _, cx| this.apply_theme_pack(path.clone(), cx)))
             .into_any_element()
     }
@@ -838,7 +846,7 @@ impl Workspace {
     /// The theme pack supplies a palette for each of these.
     fn appearance_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let cur = state::shared(cx).config.appearance;
-        let mut row = div().flex().gap(px(4.));
+        let mut row = div().flex().flex_wrap().gap(px(6.));
         for (a, zh, en) in [(Appearance::System, "跟随系统", "System"), (Appearance::Light, "浅色", "Light"), (Appearance::Dark, "深色", "Dark")] {
             row = row.child(self.appearance_btn(a, tr(cx, zh, en), cur, cx));
         }
@@ -847,10 +855,7 @@ impl Workspace {
 
     fn appearance_btn(&self, a: Appearance, label: &'static str, cur: Appearance, cx: &mut Context<Self>) -> AnyElement {
         let id = SharedString::from(format!("appearance-{label}"));
-        div().id(id).h(px(24.)).px(px(10.)).rounded(px(6.)).flex().items_center().cursor_pointer().text_size(px(12.))
-            .when(cur == a, |d| d.bg(Theme::primary().alpha(0.14)).text_color(Theme::primary()))
-            .when(cur != a, |d| d.text_color(Theme::text_caption()).hover(|s| s.bg(Theme::fill_hover())))
-            .child(label)
+        chip_shell(label.to_string(), cur == a).id(id)
             .on_click(cx.listener(move |this, _, window, cx| this.set_appearance(a, window, cx)))
             .into_any_element()
     }
@@ -1003,7 +1008,7 @@ impl Workspace {
             .child(div().px(px(14.)).pt(px(4.)).pb(px(2.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr(cx, "主题", "Theme")))
             .child(div().px(px(10.)).pb(px(2.)).flex().flex_wrap().gap(px(6.)).children(self.theme_rows(cx)))
             .child(div().px(px(14.)).pt(px(8.)).pb(px(2.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr(cx, "外观", "Appearance")))
-            .child(div().px(px(14.)).pb(px(6.)).child(self.appearance_row(cx)))
+            .child(div().px(px(10.)).pb(px(4.)).child(self.appearance_row(cx)))
             .child(
                 div().px(px(14.)).pb(px(6.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
                     .child(self.update_row(cx))
