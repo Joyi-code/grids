@@ -6,7 +6,7 @@ Windows 多窗格文件管理器。一个窗口最多 16 个窗格，布局随�
 
 界面全部自绘（GPUI，Zed 用的 Rust UI 框架），不嵌入资源管理器视图。整个程序是一个 exe，主题也打包在里面，第一次运行自动展开。
 
-![四个窗格与侧栏](docs/screenshots/overview.png)
+![四个窗格与侧栏](docs/screenshots/0.9.9/overview.png)
 
 本文截图使用演示用的模拟目录，不是真实桌面。
 
@@ -51,7 +51,7 @@ Windows 多窗格文件管理器。一个窗口最多 16 个窗格，布局随�
 
 每个窗格监视自己的目录，磁盘上有变化就重新读取。
 
-![新文件高亮与计数](docs/screenshots/live-changes.png)
+![新文件高亮与计数](docs/screenshots/0.9.9/live-changes.png)
 
 - 新增或修改的文件高亮 4 秒：前 2 秒满强度，再用 2 秒淡出。
 - 标题旁的计数（`+1`、`+2`……）持续累加，直到你碰这个窗格才清零。
@@ -61,7 +61,7 @@ Windows 多窗格文件管理器。一个窗口最多 16 个窗格，布局随�
 
 用窗格标题栏的锁按钮锁定目录。锁上后整格覆盖一层遮罩：鼠标和键盘都不能选中、打开、拖出、拖入、改名或删除。
 
-![锁定的窗格](docs/screenshots/read-only.png)
+![锁定的窗格](docs/screenshots/0.9.9/read-only.png)
 
 这层保护只在文件看板内生效，不是 NTFS 权限，其他程序仍可写入该目录。
 
@@ -71,13 +71,13 @@ Windows 多窗格文件管理器。一个窗口最多 16 个窗格，布局随�
 
 只联动两个窗格并打开对比，就能看出两边差异：绿色表示只在本侧有这个名字，琥珀色表示同名但大小或日期不同。
 
-![对比共享目录与备份](docs/screenshots/compare.png)
+![对比共享目录与备份](docs/screenshots/0.9.9/compare.png)
 
 ### 今日
 
 按最近一天、3 天、7 天列出各窗格目录下发生变化的文件，最新的在前，并标出它来自哪个目录。
 
-![今日视图](docs/screenshots/today.png)
+![今日视图](docs/screenshots/0.9.9/today.png)
 
 Enter 打开，Ctrl+Enter 在对应窗格里定位，Ctrl+C 复制，Ctrl+Shift+A 加入暂存架，Delete 移入回收站。被监视的目录有变化时会自动重新扫描。
 
@@ -93,7 +93,7 @@ Enter 打开，Ctrl+Enter 在对应窗格里定位，Ctrl+C 复制，Ctrl+Shift+
 
 Ctrl+K 打开命令面板，可搜命令、已打开的目录和保存的会话。
 
-![命令面板](docs/screenshots/command-palette.png)
+![命令面板](docs/screenshots/0.9.9/command-palette.png)
 
 Enter 执行命令或打开目录，Ctrl+Enter 在下一格打开该目录。下面这些不太显眼，但用过就回不去：
 
@@ -116,9 +116,9 @@ Enter 执行命令或打开目录，Ctrl+Enter 在下一格打开该目录。下
 - **奶油猫咪**：暖奶油配色，猫咪插画与图标。
 - **变形金刚**：钢蓝配色，金属质感插画与图标。
 
-![奶油猫咪主题](docs/screenshots/theme-cream-cat.png)
+![奶油猫咪主题](docs/screenshots/0.9.9/theme-cream-cat.png)
 
-![变形金刚主题](docs/screenshots/theme-optimus.png)
+![变形金刚主题](docs/screenshots/0.9.9/theme-optimus.png)
 
 主题不是只换颜色：配色、89 个工具栏图标、文件类型图标、空文件夹与搜索无结果插画、联动缺目录插画、版本弹层横幅、侧栏插画、窗口背景都会换。
 
@@ -211,4 +211,5 @@ build.cmd
 ## 许可
 
 [MIT](LICENSE)
+
 

@@ -6,7 +6,7 @@ A multi-pane file manager for Windows. One window holds up to sixteen panes; cha
 
 The whole interface is drawn by the program itself (GPUI, the Rust UI framework behind Zed); no Explorer view is embedded. The app is a single exe with the themes compiled in, written out on first run.
 
-![Four panes and the sidebar](docs/screenshots/overview.png)
+![Four panes and the sidebar](docs/screenshots/0.9.9/overview.png)
 
 Screenshots use a mock folder tree, not a real desktop.
 
@@ -49,7 +49,7 @@ PaneBoard puts those actions in one window: several panes at once, live change c
 
 ### Watching and change highlights
 
-![New file highlight and the counter](docs/screenshots/live-changes.png)
+![New file highlight and the counter](docs/screenshots/0.9.9/live-changes.png)
 
 - New or changed files highlight for four seconds: full strength, then a fade.
 - The counter beside the title (`+1`, `+2`…) keeps adding up until you touch that pane.
@@ -59,7 +59,7 @@ PaneBoard puts those actions in one window: several panes at once, live change c
 
 The padlock in a pane's header locks its folder. The pane is then veiled: no selecting, opening, dragging, renaming or deleting, and only that pane's padlock can lift it.
 
-![A locked pane](docs/screenshots/read-only.png)
+![A locked pane](docs/screenshots/0.9.9/read-only.png)
 
 The lock lives inside PaneBoard; it is not an NTFS permission.
 
@@ -67,13 +67,13 @@ The lock lives inside PaneBoard; it is not an NTFS permission.
 
 Link two panes and one follows the other into the same relative subfolder, up to four pairs. With exactly two linked panes, compare marks the differences.
 
-![Comparing a share with its backup](docs/screenshots/compare.png)
+![Comparing a share with its backup](docs/screenshots/0.9.9/compare.png)
 
 ### Today
 
 Today, three days or seven days of changes across every pane folder, newest first, each labelled with the folder it came from.
 
-![The Today view](docs/screenshots/today.png)
+![The Today view](docs/screenshots/0.9.9/today.png)
 
 Enter opens, Ctrl+Enter reveals it in its pane, Ctrl+C copies, Ctrl+Shift+A shelves it, Delete sends it to the recycle bin.
 
@@ -89,7 +89,7 @@ Everything saves as you go. Name the current layout in the sidebar and it comes 
 
 Ctrl+K opens the palette over commands, open folders and saved sessions.
 
-![The command palette](docs/screenshots/command-palette.png)
+![The command palette](docs/screenshots/0.9.9/command-palette.png)
 
 Enter runs a command or opens a folder, Ctrl+Enter opens it in the next pane.
 
@@ -112,9 +112,9 @@ Two themes ship inside the exe and expand into `themes\` on first run:
 - **奶油猫咪 (Cream Cat)**: warm cream palette, cat illustrations and icons.
 - **变形金刚 (Transformers)**: steel blue palette, metal illustrations and icons.
 
-![Cream Cat theme](docs/screenshots/theme-cream-cat.png)
+![Cream Cat theme](docs/screenshots/0.9.9/theme-cream-cat.png)
 
-![Transformers theme](docs/screenshots/theme-optimus.png)
+![Transformers theme](docs/screenshots/0.9.9/theme-optimus.png)
 
 A theme is not a palette swap: colours, all 89 toolbar icons, file-type icons, empty-folder and no-results illustrations, the missing-folder illustration, the popover banner, the sidebar illustration and the window backdrop all change.
 
@@ -205,3 +205,4 @@ PaneBoard is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which 
 ## Licence
 
 [MIT](LICENSE)
+
