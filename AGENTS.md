@@ -31,6 +31,25 @@ lock file it would have to change. The build needs the Windows SDK's `fxc.exe`
 (GPUI compiles HLSL shaders with it); `build.cmd` sets `GPUI_FXC_PATH` to the
 newest installed SDK, as CI does.
 
+## Branches
+
+Two branches, and only two.
+
+- `main` is what GitHub shows and what users get. It moves by pull request.
+- `gpui-rewrite` is where work happens: commit there, then open the PR into
+  `main`. Do not push to `main` directly, and do not add other long-lived
+  branches.
+
+The fork's upstream (`efww/grids`) is only where the project came from. Its
+0.7.x build, whose panes were embedded Explorer views, has nothing in common
+with this app, so there is nothing to pull, merge or sync from it, and no
+upstream remote is configured. Leave it that way: an upstream commit would
+conflict everywhere and fix nothing here.
+
+Two things from upstream stay regardless: the MIT copyright lines in
+[LICENSE](LICENSE) and the credit paragraph at the end of README.md. That is a
+licence obligation, not tracking upstream.
+
 ## Hard constraints
 
 - **No networking.** `grids.exe` must work offline forever. CI runs a deny-list
