@@ -106,11 +106,12 @@ jobs:
             exe-size-main-
 
       # users get grids.exe alone; its hash goes to the log and the run summary.
-      # Size gate: grids.exe over 8,000,000 bytes fails the job (catches runaway growth only).
+      # Size gate: grids.exe over 10,000,000 bytes fails the job (catches runaway growth only).
+          # 0.9.3 embeds the 1.9 MB cream-cat theme so the release is one exe.
       - name: Collect grids.exe
         shell: pwsh
         env:
-          SIZE_LIMIT: 8000000
+          SIZE_LIMIT: 10000000
           # v0.9 feature budget (400 KB) counts from the last measured pre-v0.9 build
           BASELINE_COMMIT: 7d7948c
           BASELINE_BYTES: 4863488
@@ -321,3 +322,4 @@ jobs:
 
       - name: Test
         run: cargo test --locked --workspace
+

@@ -119,7 +119,7 @@ Enter runs a command or opens a folder, Ctrl+Enter opens a folder in the next pa
 
 ## Download
 
-Get `grids-windows-x64.zip` from [Releases](https://github.com/Joyi-code/grids/releases/latest), unzip it anywhere and run the `grids.exe` inside. The zip already carries the `themes\cream-cat` pack, so the version popover lists it with nothing to install. The bare `grids.exe` is also there for a single file: that one has the built-in look and no theme.
+Get `grids-<version>.exe` from [Releases](https://github.com/Joyi-code/grids/releases/latest) and run it from any folder, one file. The 奶油猫咪 theme is embedded: the first run writes `themes\cream-cat\` next to the exe, and the version popover lists it with nothing to install.
 
 Nothing else needs installing, and the C runtime is linked statically. The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
 
@@ -167,5 +167,6 @@ Grids is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which was 
 
 ## Theme packs
 
-A theme is a folder with a `theme.json` (a light and a dark palette), `icons/`, `types/` and illustrations. The release zip ships a `cream-cat` pack under `themes\`; drop another folder into the same directory to add one. Pick a theme in the version popover and the app restarts into it; the system / light / dark setting is independent and keeps working.
+A theme is a folder with a `theme.json` (a light and a dark palette), `icons/`, `types/` and illustrations. 奶油猫咪 is compiled into the exe and written to `themes\cream-cat\` beside it on first run; drop another folder into the same directory to add one. Pick a theme in the version popover and the app restarts into it; the system / light / dark setting is independent and keeps working.
+
 
