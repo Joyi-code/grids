@@ -1,0 +1,3 @@
+# cmd.exe is happiest with CRLF, whatever the checkout's core.autocrlf is.
+*.cmd text eol=crlf
+*.bat text eol=crlf

@@ -4,7 +4,7 @@ A fast, lightweight multi-pane file manager for Windows. Up to 16 Explorer panes
 
 [한국어](README.ko.md)
 
-> **GPUI rewrite (branch `gpui-rewrite`, work in progress).** Grids is being rebuilt in Rust with [GPUI](https://www.gpui.rs): every part of the window, file lists included, is drawn by the app instead of embedding Explorer views. Layout presets 1–16 or any rows × columns up to 4 × 4, draggable splitters, per-pane history, breadcrumb address bar, sortable and resizable columns, name filter, Explorer-style selection and keys, native right-click menus, drag between panes, sessions saved to `grids-gpui.json` next to the exe, light and dark themes; Simplified Chinese by default (`GRIDS_LANG=en` for English). Build with `cargo build --release`; the code is a Cargo workspace (`crates/core` for logic, `crates/shell` for the Windows Shell layer, the GPUI app in `src/`). Credits in [THIRD_PARTY.md](THIRD_PARTY.md). The rest of this README describes the current release (0.7.x).
+> **GPUI rewrite (branch `gpui-rewrite`, work in progress).** Grids is being rebuilt in Rust with [GPUI](https://www.gpui.rs): every part of the window, file lists included, is drawn by the app instead of embedding Explorer views. Layout presets 1–16 or any rows × columns up to 4 × 4, draggable splitters, per-pane history, breadcrumb address bar, sortable and resizable columns, name filter, Explorer-style selection and keys, native right-click menus, drag between panes, sessions saved to `grids-gpui.json` next to the exe, light and dark themes; Simplified Chinese by default (`GRIDS_LANG=en` for English). Build with `build.cmd` (or `cargo build --release --locked`); the code is a Cargo workspace (`crates/core` for logic, `crates/shell` for the Windows Shell layer, the GPUI app in `src/`). Credits in [THIRD_PARTY.md](THIRD_PARTY.md). The rest of this README describes the current release (0.7.x).
 
 [![Grids in motion](docs/demo.gif)](docs/demo.mp4)
 
@@ -113,13 +113,19 @@ Address bar: click a folder in the path to go there; click a › to list the fol
 
 ## Build
 
-Needs the Rust GNU toolchain (`x86_64-pc-windows-gnu`) and MSYS2's MinGW tools (`windres`, `dlltool`, `as` in `C:\msys64\mingw64\bin`).
+Needs the Rust toolchain from [rustup](https://rustup.rs) (`rust-toolchain.toml` pins the compiler) and the Windows SDK: GPUI compiles its HLSL shaders with the SDK's `fxc.exe`. Installing Visual Studio's **Desktop development with C++** workload gets both the MSVC linker and the SDK. MSYS2 and MinGW are not used. (The 0.7.x release on `main` predates this rewrite and was built with the GNU toolchain.)
 
 ```
 build.cmd
 ```
 
-This builds `target\release\grids.exe` and copies it to `grids.exe` in the project folder.
+It runs `cargo build --release --locked`, copies `target\release\grids.exe` to `grids.exe` in the project folder and prints its size. It also points `GPUI_FXC_PATH` at the newest installed SDK (as CI does), so GPUI's build script does not have to know the one SDK version it was written against. The result is the same as running cargo by hand:
+
+```
+cargo build --release --locked
+```
+
+Tests: `cargo test --release --locked --workspace` (they live in `crates/core` and `crates/shell`; the Windows Shell tests drive real Explorer operations). The release profile is size-first, and CI fails the build when `grids.exe` grows past 8,000,000 bytes.
 
 The app icon (`assets/icon/`: `grids.ico` with 16–256 px, PNGs up to 1024 px) was generated with AI for this project; `build.rs` embeds it in `grids.exe` as icon resource 1.
 

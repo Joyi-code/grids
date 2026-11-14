@@ -109,6 +109,8 @@ const CELL_PAD: f32 = 8.;
 const NAME_MIN: f32 = 120.;
 /// How long a changed entry stays highlighted.
 const FRESH: Duration = Duration::from_secs(4);
+/// The wash holds at full strength this long, then fades for the rest of `FRESH`.
+const FRESH_HOLD: Duration = Duration::from_secs(2);
 /// More changes than this at once are only counted, not highlighted.
 const FRESH_MAX: usize = 500;
 
@@ -230,6 +232,14 @@ struct RenameState {
     _subs: Vec<Subscription>,
 }
 
+/// A rubber-band selection dragged out over the list's empty space.
+struct Marquee {
+    start: Point<Pixels>,
+    cur: Point<Pixels>,
+    /// Entries selected before the box started (Ctrl+drag adds to them).
+    base: Vec<usize>,
+}
+
 
 pub struct PaneView {
     /// Position in the grid (shown as number + 1).
@@ -264,7 +274,7 @@ pub struct PaneView {
     /// Entries changed by a live reload, with when they were seen; drawn
     /// with an accent wash fading out over `FRESH`.
     fresh: HashMap<String, Instant>,
-    /// Changes counted while the pane was not the active one (+N badge).
+    /// Changes counted since the user last touched the pane (+N badge).
     pub unseen: usize,
     /// The last listing and its folder, to diff the next live reload against.
     prev: Vec<Entry>,
@@ -274,6 +284,11 @@ pub struct PaneView {
     /// A first click on the breadcrumbs waits briefly for a second one
     /// (double-click maximizes) before opening the address field.
     addr_click: Option<Task<()>>,
+    /// Rubber-band selection in progress (press on empty space, drag).
+    marquee: Option<Marquee>,
+    /// The row the current press started on, so a release over another row
+    /// (a box selection, say) doesn't collapse the selection.
+    press_row: Option<usize>,
     /// Link group membership (None: not linked).
     pub link: Option<LinkView>,
     /// Panes in the grid, for the title menu.
@@ -324,6 +339,8 @@ impl PaneView {
             listed: None,
             maximized: None,
             addr_click: None,
+            marquee: None,
+            press_row: None,
             link: None,
             pane_count: 1,
         };
@@ -339,7 +356,13 @@ impl PaneView {
 
     /// Reads the folder again on a background thread; `select` picks an
     /// entry by name once it is in.
-    pub fn load(&mut self, select: Option<String>, cx: &mut Context<Self>) { self.load_with(select, false, cx) }
+    pub fn load(&mut self, select: Option<String>, cx: &mut Context<Self>) { self.ack_changes(); self.load_with(select, false, cx) }
+
+    /// The user touched the pane (a click, a key, a reload): the +N badge
+    /// starts again from zero.
+    fn ack_changes(&mut self) {
+        if self.unseen > 0 { self.unseen = 0 }
+    }
 
     /// `live`: a reload for changes on disk, whose new and modified entries
     /// are highlighted (never on entering a folder or a manual refresh).
@@ -380,8 +403,8 @@ impl PaneView {
 
     /// Diffs a fresh listing of `path` against the previous one: changed
     /// names start fading highlights (up to `FRESH_MAX` of them; more, as
-    /// when unpacking an archive, only count) and, while the pane is not
-    /// active, add to its +N badge.
+    /// when unpacking an archive, only count) and add to the +N badge.
+    /// The badge keeps counting until the user touches the pane.
     /// True when a live reload found changes.
     fn note_changes(&mut self, path: &Path, live: bool, entries: &[Entry]) -> bool {
         let same = self.listed.as_deref() == Some(path);
@@ -391,7 +414,7 @@ impl PaneView {
             let ch = grids_core::diff::diff_entries(&self.prev, entries);
             if !ch.is_empty() {
                 changed = true;
-                if !self.active { self.unseen += ch.len() }
+                self.unseen += ch.len();
                 if ch.len() <= FRESH_MAX {
                     let now = Instant::now();
                     for n in ch.added.into_iter().chain(ch.modified) { self.fresh.insert(n, now); }
@@ -403,10 +426,12 @@ impl PaneView {
         changed
     }
 
-    /// The accent wash over a changed entry: 18 % fading to 0 over `FRESH`.
+    /// The accent wash over a changed entry: 30 % held for `FRESH_HOLD`,
+    /// then fading to 0 by `FRESH`.
     fn fresh_wash(&self, name: &str) -> Option<Hsla> {
-        let t = self.fresh.get(name)?.elapsed().as_secs_f32() / FRESH.as_secs_f32();
-        (t < 1.).then(|| Theme::primary().alpha(0.18 * (1. - t)))
+        let secs = self.fresh.get(name)?.elapsed().as_secs_f32();
+        let t = ((secs - FRESH_HOLD.as_secs_f32()) / (FRESH.as_secs_f32() - FRESH_HOLD.as_secs_f32())).clamp(0., 1.);
+        (t < 1.).then(|| Theme::primary().alpha(0.30 * (1. - t)))
     }
 
     /// Watches the current folder; changes reload it after a short pause.
@@ -547,6 +572,9 @@ impl PaneView {
     }
 
     fn move_cursor(&mut self, delta: isize, to_end: bool, shift: bool, ctrl: bool, cx: &mut Context<Self>) {
+        // A locked folder has nothing to select, by mouse or by keyboard.
+        if self.here_locked(cx) { return }
+        self.ack_changes();
         self.state.move_cursor(delta, to_end, shift, ctrl);
         if let Some(r) = self.state.cursor { self.reveal(r, ScrollStrategy::Top) }
         cx.notify();
@@ -582,7 +610,7 @@ impl PaneView {
 
     fn type_to_select(&mut self, ev: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
         // Only when the list itself has focus, not one of the pane's text fields.
-        if !self.focus.is_focused(window) { return }
+        if !self.focus.is_focused(window) || self.here_locked(cx) { return }
         let k = &ev.keystroke;
         if k.modifiers.control || k.modifiers.alt || k.modifiers.platform || self.editing() { return }
         let Some(ch) = k.key_char.as_ref().filter(|c| c.chars().all(|c| !c.is_control()) && !c.is_empty()) else { return };
@@ -866,6 +894,7 @@ impl PaneView {
     fn run_op(&mut self, op: Op, paths: Vec<PathBuf>, dest: Option<PathBuf>, select: Vec<String>, cx: &mut Context<Self>) {
         if paths.is_empty() { return }
         // Last line of defence for every route here (keys, menus, drops).
+        // A move out of a read-only area is refused; a copy is fine.
         if !matches!(op, Op::Copy) && self.refuse_locked(&paths, cx) { return }
         if let Some(d) = &dest && self.refuse_locked(std::slice::from_ref(d), cx) { return }
         if op == Op::Move {
@@ -913,8 +942,13 @@ impl PaneView {
     fn drop_files(&mut self, d: &DraggedFiles, into: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let dest = into.unwrap_or_else(|| self.state.path.clone());
         if d.from == dest || d.paths.iter().any(|p| p == &dest || dest.starts_with(p)) { return }
-        // Out of a read-only folder a drag only copies.
-        let copy = window.modifiers().control || state::locked_any(cx, &d.paths).is_some() || !d.paths.first().is_some_and(|p| grids_shell::same_volume(p, &dest));
+        // Out of a read-only folder a drag only copies, and says so.
+        let same_vol = d.paths.first().is_some_and(|p| grids_shell::same_volume(p, &dest));
+        let locked = state::locked_any(cx, &d.paths).is_some();
+        let copy = window.modifiers().control || locked || !same_vol;
+        if locked && same_vol && !window.modifiers().control {
+            cx.emit(PaneEvent::Toast(tr(cx, "只读文件夹：已复制，未移动", "Read-only folder: copied, not moved").into()));
+        }
         let names = d.paths.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         window.focus(&self.focus);
         self.run_op(if copy { Op::Copy } else { Op::Move }, d.paths.clone(), Some(dest), names, cx);
@@ -925,6 +959,79 @@ impl PaneView {
         let list: Vec<PathBuf> = paths.paths().iter().filter(|p| p.parent() != Some(dest.as_path())).cloned().collect();
         let names = list.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         self.run_op(Op::Copy, list, Some(dest), names, cx);
+    }
+
+    // ---- rubber-band selection
+
+    /// Tracks the pointer while a box is dragged out over the list.
+    fn marquee_track(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let weak_up = weak.clone();
+        canvas(|_, _, _| {}, move |_, _, window, _| {
+            let w = weak.clone();
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture { return }
+                let _ = w.update(cx, |this, cx| this.marquee_to(ev.position, cx));
+            });
+            let w = weak_up.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture { return }
+                let _ = w.update(cx, |this, cx| if this.marquee.take().is_some() { cx.notify() });
+            });
+        }).absolute().size_full()
+    }
+
+    fn marquee_to(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let (start, base) = match &mut self.marquee {
+            Some(m) => {
+                if m.cur == pos { return }
+                m.cur = pos;
+                (m.start, m.base.clone())
+            }
+            None => return,
+        };
+        let rows = self.marquee_rows(start, pos);
+        self.state.select_rows(&rows, &base);
+        cx.notify();
+    }
+
+    /// Rows whose item rectangle meets the box.
+    fn marquee_rows(&self, a: Point<Pixels>, b: Point<Pixels>) -> Vec<usize> {
+        let n = self.state.len();
+        let bounds = self.list_bounds.get();
+        let avail = f32::from(bounds.size.width);
+        if n == 0 || avail <= 1. { return Vec::new() }
+        let (ax, ay, bx, by) = (f32::from(a.x), f32::from(a.y), f32::from(b.x), f32::from(b.y));
+        let (x0, x1) = (ax.min(bx), ax.max(bx));
+        let (y0, y1) = (ay.min(by), ay.max(by));
+        let (left, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        let scroll = f32::from(self.scroll.0.borrow().base_handle.offset().y);
+        let mut out = Vec::new();
+        match grid_metrics(self.view, avail) {
+            None => {
+                let first = ((y0 - top + scroll) / ROW_H).floor().max(0.) as usize;
+                let last = ((y1 - top + scroll) / ROW_H).floor().max(0.) as usize;
+                for r in first..=last.min(n - 1) {
+                    let itop = top + r as f32 * ROW_H - scroll;
+                    if itop + ROW_H >= y0 && itop <= y1 { out.push(r) }
+                }
+            }
+            Some(g) => {
+                let first = ((y0 - top + scroll) / g.cell_h).floor().max(0.) as usize;
+                let last = ((y1 - top + scroll) / g.cell_h).floor().max(0.) as usize;
+                for row in first..=last {
+                    let itop = top + row as f32 * g.cell_h - scroll;
+                    if itop + g.cell_h < y0 || itop > y1 { continue }
+                    for c in 0..g.cols {
+                        let i = row * g.cols + c;
+                        if i >= n { break }
+                        let ileft = left + ROW_X + c as f32 * g.cell_w;
+                        if ileft + g.cell_w >= x0 && ileft <= x1 { out.push(i) }
+                    }
+                }
+            }
+        }
+        out
     }
 
     // ---- context menu
@@ -1449,13 +1556,14 @@ impl PaneView {
                 .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))
                 .child(icon(glyph, 16., if enabled { Theme::icon() } else { Theme::text_disabled() }))
         };
-        // Changes while another pane had the focus.
+        // Changes since the user last touched this pane.
+        let seen_tip = t("新增或修改的文件数，点一下格子即清零", "Added or modified since you last touched this pane; click to clear");
         let unseen = (self.unseen > 0).then(|| {
             div().id("unseen").flex_none().h(px(18.)).px(px(6.)).rounded(px(9.)).flex().items_center()
                 .bg(Theme::primary().alpha(0.14)).text_color(Theme::primary())
                 .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD)
                 .child(format!("+{}", self.unseen.min(9999)))
-                .tip(t("失焦期间的变化", "Changes while away"), None)
+                .tip(seen_tip, None)
         });
         let max_tag = self.maximized.map(|n| {
             div().flex_none().h(px(20.)).px(px(7.)).rounded(px(6.)).flex().items_center().gap(px(4.))
@@ -1618,6 +1726,8 @@ impl PaneView {
         let lang = state::lang(cx);
         let path = e.path.clone();
         let is_dir = e.is_dir;
+        // Read-only folders open and copy, but their items never start a drag.
+        let draggable = state::locked_root(cx, &self.state.path).is_none();
         let drag = if selected { self.state.selected_paths() } else { vec![e.path.clone()] };
         let label: SharedString = if drag.len() > 1 { format!("{} {}", drag.len(), if lang == format::Lang::En { "items" } else { "项" }).into() } else { e.name.clone().into() };
         let payload = DraggedFiles { paths: drag, from: self.state.path.clone(), label };
@@ -1625,6 +1735,9 @@ impl PaneView {
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 this.menu = None;
+                // Touching the pane accepts the changes counted so far.
+                this.ack_changes();
+                this.press_row = Some(r);
                 window.focus(&this.focus);
                 let m = ev.modifiers;
                 if ev.click_count >= 2 && !m.control && !m.shift { return this.open_row(r, cx) }
@@ -1633,7 +1746,8 @@ impl PaneView {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
                 let m = ev.modifiers;
-                if !m.control && !m.shift && !cx.has_active_drag() && this.state.selected_count() > 1 && this.state.is_selected(r) {
+                let pressed = this.press_row.take() == Some(r);
+                if pressed && !m.control && !m.shift && !cx.has_active_drag() && this.state.selected_count() > 1 && this.state.is_selected(r) {
                     this.state.click(Some(r), false, false);
                     cx.notify();
                 }
@@ -1642,7 +1756,7 @@ impl PaneView {
                 cx.stop_propagation();
                 this.context_menu(Some(r), ev.position, window, cx);
             }))
-            .on_drag(payload, |d, _, _, cx| cx.new(|_| d.clone()))
+            .when(draggable, |d| d.on_drag(payload, |p, _, _, cx| cx.new(|_| p.clone())))
             .when(is_dir, |d| {
                 let p1 = path.clone();
                 let p2 = path.clone();
@@ -1791,7 +1905,8 @@ impl Render for PaneView {
         let scale = window.scale_factor();
         let pane_id = cx.entity_id();
         let rows = grid.map_or(n, |g| n.div_ceil(g.cols));
-        let list = uniform_list("files", rows, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+        // A locked folder is drawn under a veil; its items never start a drag.
+        let mut list = uniform_list("files", rows, cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
             let focused = this.focus.contains_focused(window, cx) || this.menu.is_some() || this.rename.is_some();
             let Some(g) = grid else {
                 thumbs::set_visible(pane_id, HashSet::new(), cx);
@@ -1808,6 +1923,9 @@ impl Render for PaneView {
         .track_scroll(self.scroll.clone())
         .size_full()
         .pb(px(6.));
+        // A locked folder is drawn under a veil; its items never start a drag.
+        let locked = state::locked_root(cx, &self.state.path);
+        if locked.is_some() { list = list.opacity(0.5) }
         let list_bounds = self.list_bounds.clone();
         let empty_msg: Option<String> = if let Some(err) = &self.state.error { Some(err.clone()) } else if n == 0 && !self.loading {
             Some(if !self.state.filter.is_empty() { if en { "No matching items." } else { "没有匹配的项目。" } } else if en { "This folder is empty." } else { "此文件夹为空。" }.to_string())
@@ -1824,6 +1942,36 @@ impl Render for PaneView {
                     .child(if en { "Create folder" } else { "创建文件夹" })
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(PaneEvent::Link(LinkCmd::CreateMissing)))))
         });
+        // A locked folder takes no clicks at all: nothing to select, nothing to
+        // drag, nothing to drop onto.
+        let lock_veil = locked.as_ref().map(|root| {
+            let tip: SharedString = if root == &self.state.path {
+                if en { "Locked folder (inside Grids only) · unlock with the lock button in the title bar".into() } else { "文件夹已锁定（仅在 Grids 内生效）· 点标题栏的锁图标解锁".into() }
+            } else if en { format!("Locked at “{}” · unlock with the lock button in the title bar", root.display()).into() } else { format!("由「{}」锁定 · 点标题栏的锁图标解锁", root.display()).into() };
+            let root2 = root.clone();
+            div().id("lock-veil").absolute().inset_0().occlude()
+                .bg(Theme::bg_body().alpha(0.30))
+                .flex().flex_col().items_center().justify_center().gap(px(8.))
+                .child(icon("lock", 26., Theme::primary()))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text())
+                    .child(if en { "This folder is locked" } else { "此文件夹已锁定" }))
+                .child(div().text_size(px(12.)).text_color(Theme::text_caption())
+                    .child(if en { "Unlock it to select, drag or copy" } else { "解锁后才能选中、拖动或复制" }))
+                .tip(&tip, None)
+                .on_drop(cx.listener(move |_, _: &DraggedFiles, _, cx| cx.emit(PaneEvent::Locked(root2.clone()))))
+        });
+        // The box being dragged out, in the body's coordinates.
+        let marquee_box = self.marquee.as_ref().map(|m| {
+            let bounds = self.list_bounds.get();
+            let (ax, ay, bx, by) = (f32::from(m.start.x), f32::from(m.start.y), f32::from(m.cur.x), f32::from(m.cur.y));
+            let (x0, x1) = (ax.min(bx), ax.max(bx));
+            let (y0, y1) = (ay.min(by), ay.max(by));
+            div().absolute()
+                .left(px(x0 - f32::from(bounds.origin.x)))
+                .top(px(y0 - f32::from(bounds.origin.y)))
+                .w(px((x1 - x0).max(1.))).h(px((y1 - y0).max(1.)))
+                .border_1().border_color(Theme::primary()).bg(Theme::primary().alpha(0.12)).rounded(px(2.))
+        });
         let body = div()
             .id("list-body")
             .relative()
@@ -1838,7 +1986,10 @@ impl Render for PaneView {
                 if (old.size.width - b.size.width).abs() > px(0.5) { window.request_animation_frame() }
             }, |_, _, _, _| {}).absolute().size_full())
             .child(self.ctrl_wheel(cx))
+            .child(self.marquee_track(cx))
             .child(list)
+            .children(marquee_box)
+            .children(lock_veil)
             .when_some(empty_msg, |d, msg| d.child(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(msg)))
             .children(missing)
             .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(Theme::drop_target()))
@@ -1847,8 +1998,13 @@ impl Render for PaneView {
             .on_drop(cx.listener(|this, d: &ExternalPaths, _, cx| this.drop_external(d, None, cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.menu = None;
+                this.ack_changes();
                 window.focus(&this.focus);
                 this.state.click(None, ev.modifiers.control, ev.modifiers.shift);
+                // Pressing empty space starts a rubber-band selection.
+                this.press_row = None;
+                let base = if ev.modifiers.control { this.state.selected_indices() } else { Vec::new() };
+                this.marquee = Some(Marquee { start: ev.position, cur: ev.position, base });
                 cx.notify();
             }))
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| this.context_menu(None, ev.position, window, cx)));
@@ -1884,7 +2040,7 @@ impl Render for PaneView {
             .on_action(cx.listener(|this, _: &EditAddress, window, cx| this.edit_address(window, cx)))
             .on_action(cx.listener(|this, _: &FilterNames, window, cx| this.start_filter(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleHidden, _, cx| this.toggle_hidden(cx)))
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| { this.state.select_all(); cx.notify() }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| { if this.here_locked(cx) { return } this.state.select_all(); cx.notify() }))
             .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_rows(-1, false, false, cx)))
             .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_rows(1, false, false, cx)))
             .on_action(cx.listener(|this, _: &CursorLeft, _, cx| this.move_side(-1, false, cx)))

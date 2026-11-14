@@ -111,13 +111,21 @@ Windows용 빠르고 가벼운 다중 패널 파일 관리자입니다. 한 창�
 
 ## 빌드
 
-Rust GNU 툴체인(`x86_64-pc-windows-gnu`)과 MSYS2의 MinGW 도구(`C:\msys64\mingw64\bin`의 `windres`, `dlltool`, `as`)가 필요합니다.
+[rustup](https://rustup.rs)으로 설치한 Rust 툴체인(`rust-toolchain.toml`이 컴파일러 버전을 고정합니다)과 Windows SDK가 필요합니다. GPUI는 SDK의 `fxc.exe`로 HLSL 셰이더를 컴파일합니다. Visual Studio의 **C++를 사용한 데스크톱 개발** 워크로드를 설치하면 MSVC 링커와 SDK가 함께 들어옵니다. MSYS2와 MinGW는 쓰지 않습니다.
 
 ```
 build.cmd
 ```
 
-`target\release\grids.exe`를 빌드해 프로젝트 폴더에 `grids.exe`로 복사합니다. 앱 아이콘(`app.ico`)은 `icon.py`로 다시 그립니다.
+`cargo build --release --locked`를 실행하고 `target\release\grids.exe`를 프로젝트 폴더의 `grids.exe`로 복사한 뒤 크기를 출력합니다. 또한 `GPUI_FXC_PATH`를 가장 최근에 설치된 SDK로 지정합니다(CI와 같은 방식). 덕분에 GPUI의 빌드 스크립트가 미리 알고 있는 SDK 버전에 의존하지 않습니다. 직접 실행해도 결과는 같습니다:
+
+```
+cargo build --release --locked
+```
+
+테스트: `cargo test --release --locked --workspace`(테스트는 `crates/core`와 `crates/shell`에 있고, Windows 셸 테스트는 실제 탐색기 작업을 실행합니다). 릴리스 프로필은 크기 우선이며, CI는 `grids.exe`가 8,000,000바이트를 넘으면 빌드를 실패로 처리합니다.
+
+앱 아이콘(`assets/icon/`: 16–256px `grids.ico`, 최대 1024px PNG)은 이 프로젝트를 위해 AI로 만들었고, `build.rs`가 `grids.exe`에 아이콘 리소스 1번으로 넣습니다.
 
 ## 감사
 
