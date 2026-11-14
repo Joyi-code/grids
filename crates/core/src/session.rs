@@ -218,11 +218,13 @@ pub struct Config {
     pub notes: BTreeMap<String, String>,
     /// Visited folders for frecency (see [`crate::frecency`]).
     pub recent: Vec<crate::frecency::Recent>,
+    /// Look for a newer release once at startup (one request, sends nothing).
+    pub check_updates: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { version: 1, lang: Lang::Zh, appearance: Appearance::System, sidebar_open: true, sidebar_width: 220., favourites: vec![], current: Session::default(), sessions: vec![], session_name: None, window: None, locked: vec![], shelf: vec![], notes: BTreeMap::new(), recent: vec![] }
+        Self { version: 1, lang: Lang::Zh, appearance: Appearance::System, sidebar_open: true, sidebar_width: 220., favourites: vec![], current: Session::default(), sessions: vec![], session_name: None, window: None, locked: vec![], shelf: vec![], notes: BTreeMap::new(), recent: vec![], check_updates: true }
     }
 }
 

@@ -30,6 +30,14 @@ pub fn open_with_system(path: &Path) -> io::Result<()> {
     }
 }
 
+pub fn open_url(url: &str) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        spawn("open", &[url.as_ref()])
+    } else {
+        spawn("xdg-open", &[url.as_ref()])
+    }
+}
+
 pub fn reveal_in_explorer(path: &Path) -> io::Result<()> {
     if cfg!(target_os = "macos") {
         return spawn("open", &["-R".as_ref(), path.as_os_str()]);

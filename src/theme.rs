@@ -213,7 +213,7 @@ pub mod craft {
     /// Window surfaces (measured on the key window).
     /// The sunken surface: the sidebar material, here the whole window
     /// behind the note.
-    pub const WINDOW: u32 = 0xeff0f1;
+    pub const WINDOW: u32 = 0xf9fafb;
     /// The chrome between floating panels.
     pub const CHROME: u32 = 0xe6e7e8;
 }
@@ -278,12 +278,12 @@ impl Theme {
     pub fn caret() -> Hsla { c(craft::B500) }
     pub fn star() -> Hsla { c(0xf5a524) }
     /// The window surface: the sidebar material behind the content.
-    pub fn window() -> Hsla { ca(craft::WINDOW, if glass() { 0.84 } else { 1. }) }
+    pub fn window() -> Hsla { c(craft::WINDOW) }
     /// Sidebar section titles.
     pub fn sidebar_section() -> Hsla { c(0x333739) }
     pub fn sidebar_text() -> Hsla { ca(craft::N900, 0.85) }
-    pub fn sidebar_hover() -> Hsla { ca(craft::N1000, 0.045) }
-    pub fn sidebar_selected() -> Hsla { ca(craft::N1000, 0.072) }
+    pub fn sidebar_hover() -> Hsla { ca(craft::N1000, 0.035) }
+    pub fn sidebar_selected() -> Hsla { ca(craft::N1000, 0.05) }
     /// Monochrome icons.
     pub fn icon() -> Hsla { if dark() { ca(craft::N900, 0.6) } else { rgb(0x191919).into() } }
     pub fn icon_muted() -> Hsla { c(craft::N500) }
@@ -348,3 +348,4 @@ pub fn kind_icon(k: grids_core::FileKind) -> &'static str {
         Other => "file",
     }
 }
+

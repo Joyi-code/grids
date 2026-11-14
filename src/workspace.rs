@@ -11,6 +11,7 @@ use gpui::{prelude::FluentBuilder, *};
 use grids_core::format;
 use grids_core::layout::{self, Layout};
 use grids_core::session::{Appearance, PaneSave, Session};
+use grids_core::version;
 use grids_shell::KnownFolderKind;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -167,11 +168,53 @@ pub struct Workspace {
     today: Option<today::Today>,
     lockers: Option<lockers::LockersDlg>,
     history: Option<history::HistoryPanel>,
+    /// What the update check found; drives the sidebar pill and the popover.
+    update: UpdateState,
     _subs: Vec<Subscription>,
 }
 
+/// Where the update check stands.
+#[derive(Clone, PartialEq)]
+enum UpdateState {
+    Idle,
+    Checking,
+    Current,
+    Newer(String),
+    Failed,
+}
+
+/// The one address the app asks about versions, and where its releases live.
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Joyi-code/grids/releases/latest";
+const RELEASES_PAGE: &str = "https://github.com/Joyi-code/grids/releases/latest";
+const PROJECT_PAGE: &str = "https://github.com/Joyi-code/grids";
+
 fn home_dir() -> PathBuf {
     grids_shell::known_folders().into_iter().find(|k| k.kind == KnownFolderKind::Home).map(|k| k.path).unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
+}
+
+/// Opens the releases page in the browser.
+fn open_releases() { let _ = grids_shell::open_url(RELEASES_PAGE); }
+
+/// The newest release tag when it beats this build: `Ok(None)` means up to
+/// date, `Err` that the request could not be made (offline, no curl, a
+/// rate-limited GitHub). Only the GET leaves the machine.
+fn fetch_latest() -> Result<Option<String>, ()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("curl.exe")
+            .args(["-sS", "--fail", "--max-time", "8", "-H", "User-Agent: PaneBoard-update-check", LATEST_RELEASE_API])
+            .stdin(std::process::Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console flashes
+            .output()
+            .map_err(|_| ())?;
+        if !out.status.success() { return Err(()) }
+        let body = String::from_utf8_lossy(&out.stdout);
+        let latest = version::parse_latest(&body).ok_or(())?;
+        Ok(version::is_newer(&latest, env!("CARGO_PKG_VERSION")).then_some(latest))
+    }
+    #[cfg(not(windows))]
+    { Err(()) }
 }
 
 impl Workspace {
@@ -209,6 +252,7 @@ impl Workspace {
             today: None,
             lockers: None,
             history: None,
+            update: UpdateState::Idle,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -226,6 +270,7 @@ impl Workspace {
             let drives = cx.background_executor().spawn(async { grids_shell::drives() }).await;
             if this.update(cx, |this, cx| if this.drives != drives { this.drives = drives; cx.notify() }).is_err() { break }
         }).detach();
+        if state::shared(cx).config.check_updates { me.check_update(cx) }
         me
     }
 
@@ -579,7 +624,9 @@ impl Workspace {
     /// (MIT attribution travels with grids.exe alone).
     fn render_about(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         const LICENSE: &str = include_str!("../LICENSE");
+        const LICENSE_ZH: &str = include_str!("../LICENSE.zh.md");
         const THIRD_PARTY: &str = include_str!("../THIRD_PARTY.md");
+        const THIRD_PARTY_ZH: &str = include_str!("../THIRD_PARTY.zh.md");
         let tab = self.about?;
         let tab_btn = |id: &'static str, label: &'static str, n: u8| {
             div().id(id).h(px(28.)).px(px(10.)).rounded(px(7.)).flex().items_center().cursor_pointer()
@@ -589,7 +636,8 @@ impl Workspace {
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| { this.about = Some(n); cx.notify() }))
         };
-        let text = if tab == 0 { LICENSE } else { THIRD_PARTY };
+        let en = state::en(cx);
+        let text = match (tab, en) { (0, true) => LICENSE, (0, false) => LICENSE_ZH, (_, true) => THIRD_PARTY, (_, false) => THIRD_PARTY_ZH };
         let panel = popover()
             .id("about")
             .w(px(640.))
@@ -633,6 +681,88 @@ impl Workspace {
 
     // ---- version popover and confirmation dialogs
 
+    /// Asks GitHub for the newest release tag, once. The request is made by the
+    /// system's curl.exe, so grids.exe links no networking code, and the only
+    /// thing sent is that GET: no files, no folder names, no counters.
+    fn check_update(&mut self, cx: &mut Context<Self>) {
+        if self.update == UpdateState::Checking { return }
+        self.update = UpdateState::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            // Let the window settle first: the check is not urgent.
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let found = cx.background_executor().spawn(async { fetch_latest() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.update = match found {
+                    Ok(Some(v)) => UpdateState::Newer(v),
+                    Ok(None) => UpdateState::Current,
+                    Err(()) => UpdateState::Failed,
+                };
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// "新版本 0.9.1" above the version label, while a newer release is known.
+    fn update_pill(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let UpdateState::Newer(v) = &self.update else { return None };
+        let label = if state::en(cx) { format!("New version {v}") } else { format!("新版本 {v}") };
+        Some(
+            div().id("update-pill").h(px(28.)).px(px(8.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
+                .bg(Theme::primary().alpha(0.12)).text_color(Theme::primary()).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
+                .hover(|s| s.bg(Theme::primary().alpha(0.2)))
+                .child(icon("download", 14., Theme::primary()))
+                .child(label)
+                .tip(tr(cx, "打开下载页面", "Open the download page"), None)
+                .on_click(cx.listener(|_, _, _, _| open_releases())),
+        )
+    }
+
+    /// The version popover's "updates" row: a status, clickable when a check
+    /// or a download makes sense.
+    fn update_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let en = state::en(cx);
+        let (text, link) = match &self.update {
+            UpdateState::Idle => (if en { "Check for updates".to_string() } else { "检查更新".to_string() }, false),
+            UpdateState::Checking => (if en { "Checking…".to_string() } else { "正在检查…".to_string() }, false),
+            UpdateState::Current => (if en { "Up to date".to_string() } else { "已是最新版本".to_string() }, false),
+            UpdateState::Newer(v) => (if en { format!("Version {v} is available") } else { format!("发现新版本 {v}") }, true),
+            UpdateState::Failed => (if en { "Check failed, click to retry".to_string() } else { "检查失败，点击重试".to_string() }, true),
+        };
+        let retry = self.update == UpdateState::Idle || self.update == UpdateState::Failed;
+        let hot = link || retry;
+        div().id("update-row").h(px(24.)).flex().items_center().gap(px(12.))
+            .when(hot, |d| d.cursor_pointer())
+            .child(div().w(px(64.)).flex_none().text_color(Theme::text_caption()).child(tr(cx, "更新", "Updates")))
+            .child(
+                div().flex_1().min_w_0().flex().items_center().gap(px(6.))
+                    .text_color(if link { Theme::primary() } else { Theme::text() })
+                    .when(link, |d| d.child(icon("download", 13., Theme::primary())))
+                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text)),
+            )
+            .when(link, |d| d.on_click(cx.listener(|_, _, _, _| open_releases())))
+            .when(retry, |d| d.on_click(cx.listener(|this, _, _, cx| this.check_update(cx))))
+    }
+
+    /// Whether to look for a newer release at startup.
+    fn check_updates_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = state::shared(cx).config.check_updates;
+        div().id("check-updates").h(px(24.)).flex().items_center().gap(px(12.)).cursor_pointer()
+            .child(div().w(px(64.)).flex_none().text_color(Theme::text_caption()).child(tr(cx, "启动时检查", "Check at startup")))
+            .child(
+                div().flex_1().flex().items_center().gap(px(6.)).text_color(if on { Theme::text() } else { Theme::text_caption() })
+                    .child(icon(if on { "check" } else { "minus" }, 13., if on { Theme::primary() } else { Theme::icon_muted() }))
+                    .child(if on { tr(cx, "开启", "On") } else { tr(cx, "关闭", "Off") }),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                let on = state::shared(cx).config.check_updates;
+                cx.global_mut::<Shared>().config.check_updates = !on;
+                this.schedule_save(cx);
+                if !on { this.update = UpdateState::Idle }
+                cx.notify();
+            }))
+    }
+
     /// "v0.9.0" at the bottom left (the sidebar's foot, or the status bar's
     /// start while the sidebar is hidden); opens the version popover.
     fn version_label(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -673,7 +803,6 @@ impl Workspace {
                 .child(div().w(px(64.)).flex_none().text_color(Theme::text_caption()).child(label))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
         };
-        let platform = format!("{} {}", match std::env::consts::OS { "windows" => "Windows", "linux" => "Linux", "macos" => "macOS", o => o }, std::env::consts::ARCH);
         let panel = div()
             .id("version-pop")
             .absolute()
@@ -706,10 +835,8 @@ impl Workspace {
             .child(
                 div().px(px(14.)).pb(px(6.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
                     .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string()))
-                    .child(row(tr(cx, "提交", "Commit"), env!("GRIDS_GIT_HASH").to_string()))
-                    .child(row(tr(cx, "构建日期", "Built"), env!("GRIDS_BUILD_DATE").to_string()))
-                    .child(row(tr(cx, "平台", "Platform"), platform))
-                    .child(row(tr(cx, "项目", "Project"), "github.com/Joyi-code/grids".to_string())),
+                    .child(self.update_row(cx))
+                    .child(self.check_updates_toggle(cx)),
             )
             .child(div().h(px(9.)).flex().items_center().mx(px(12.)).child(div().h(px(1.)).flex_1().bg(Theme::line_divider())))
             .child(
@@ -725,7 +852,16 @@ impl Workspace {
                         cx.notify();
                     })),
             )
-            .child(div().px(px(14.)).pt(px(4.)).pb(px(8.)).text_size(px(11.)).text_color(Theme::text_placeholder()).child(tr(cx, "Grids 完全离线运行，不连接网络。", "Grids runs fully offline and never connects to the network.")));
+            .child(
+                div().id("version-project").h(px(30.)).mx(px(4.)).pl(px(8.)).pr(px(10.)).rounded(px(6.)).flex().items_center().cursor_pointer()
+                    .hover(|s| s.bg(Theme::fill_hover_strong())).active(|s| s.bg(Theme::fill_pressed()))
+                    .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(8.)).child(icon("link", 15., Theme::icon())))
+                    .child(div().flex_1().child(tr(cx, "项目主页与更新说明", "Project page and release notes")))
+                    .child(icon("chevron-right", 14., Theme::icon_muted()))
+                    .on_click(|_, _, _| { let _ = grids_shell::open_url(PROJECT_PAGE); }),
+            )
+            .child(div().px(px(14.)).pt(px(6.)).pb(px(8.)).text_size(px(11.)).text_color(Theme::text_placeholder())
+                .child(tr(cx, "启动时只查询一次 GitHub 上的最新版本号，不上传任何文件或数据。", "Asks GitHub for the latest version once at startup; uploads no files or data.")));
         Some(
             deferred(
                 div().id("version-pop-scrim").absolute().inset_0().occlude()
@@ -1117,7 +1253,11 @@ impl Workspace {
                     .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(img("icon/grids-48.png").size(px(20.)).flex_none()).child(div().font_weight(FontWeight::SEMIBOLD).child(state::brand(cx)))),
             )
             .child(col)
-            .child(div().flex_none().h(px(40.)).px(px(SB_X)).flex().items_center().child(self.version_label(cx)))
+            .child(
+                div().flex_none().px(px(SB_X)).pb(px(4.)).flex().flex_col().gap(px(6.))
+                    .children(self.update_pill(cx))
+                    .child(self.version_label(cx)),
+            )
             .child(
                 div().id("sidebar-resize").absolute().right(px(-3.)).top_0().h_full().w(px(6.)).cursor(CursorStyle::ResizeColumn)
                     .on_drag(SidebarDrag, |d, _, _, cx| cx.new(|_| d.clone())),
@@ -1603,3 +1743,4 @@ fn mini_layout(cols: &[usize], on: bool) -> Div {
     }
     d
 }
+

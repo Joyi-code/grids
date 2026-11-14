@@ -242,6 +242,14 @@ pub fn open_with_system(path: &Path) -> io::Result<()> {
     open_default(path, true)
 }
 
+/// Opens a URL with its default handler, normally the browser. No download and
+/// no parsing happens here: the shell hands the string to the registered
+/// protocol handler.
+pub fn open_url(url: &str) -> io::Result<()> {
+    ensure_com();
+    shell_execute(PCWSTR::null(), &HSTRING::from(url), &HSTRING::new(), None, SEE_MASK_FLAG_NO_UI).map_err(win_err)
+}
+
 // ---------- shortcuts ----------
 
 fn expand_env(s: &str) -> String {

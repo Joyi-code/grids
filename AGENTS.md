@@ -52,11 +52,15 @@ licence obligation, not tracking upstream.
 
 ## Hard constraints
 
-- **No networking.** `grids.exe` must work offline forever. CI runs a deny-list
-  over `cargo tree` (reqwest, hyper, tokio, rustls, tungstenite, curl and
-  friends) and checks the exe's imports with `dumpbin` for winhttp, wininet,
-  ws2_32 and similar. A dependency that needs HTTP is out of scope, not a
-  trade-off to weigh.
+- **No networking code beyond the version check.** `grids.exe` links no HTTP
+  stack: CI runs a deny-list over `cargo tree` (reqwest, hyper, tokio, rustls,
+  tungstenite, curl and friends) and checks the exe's imports with `dumpbin`
+  for winhttp, wininet, ws2_32 and similar. The one outbound request is the
+  update check in `src/workspace.rs` (`fetch_latest`): a single GET to the
+  GitHub releases API, run through the system's `curl.exe` so no library is
+  linked, sending only that URL, and switchable off in the version popover.
+  Anything else that talks to the network is out of scope, and the README says
+  exactly this: keep that promise true.
 - **No panics in the platform layer.** `crates/shell` returns `Result` or
   `Option` and degrades gracefully; a failing shell call must not take the app
   down. `unwrap`/`expect` belong in tests and build scripts, not in code that

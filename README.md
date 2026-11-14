@@ -4,7 +4,7 @@
 
 A multi-pane file manager for Windows, drawn entirely by the app: up to 16 panes in one window, layouts you shape by dragging, and a few things Explorer does not do. A Today view, live change highlights, read-only folders that cannot be dragged out, linked panes that compare two folder trees, and a shelf for carrying files between panes.
 
-This repository is a fork and a rewrite. Grids began as [efww/grids](https://github.com/efww/grids), a Q-Dir style manager whose panes were embedded Windows Explorer views. Here the window, the file lists and every menu and dialog are drawn by the app itself with [GPUI](https://www.gpui.rs), the Rust UI framework behind Zed. No Explorer view is embedded anywhere, and the program is a single exe of about 5.5 MB that never touches the network.
+This repository is a fork and a rewrite. Grids began as [efww/grids](https://github.com/efww/grids), a Q-Dir style manager whose panes were embedded Windows Explorer views. Here the window, the file lists and every menu and dialog are drawn by the app itself with [GPUI](https://www.gpui.rs), the Rust UI framework behind Zed. No Explorer view is embedded anywhere, and the program is a single exe of about 5.5 MB. It never uploads anything; the only request it can make is the version check described below.
 
 In the window the app calls itself **文件看板** in Chinese and **PaneBoard** in English. The repository, the executable (`grids.exe`) and the settings file keep the name Grids.
 
@@ -143,13 +143,19 @@ cargo build --release --locked
 
 The result is a single `grids.exe`; put it in any folder and run it. Settings (`grids-gpui.json`) and the operation journal (`grids-journal.jsonl`) are written next to the exe, so the folder has to be writable. `GRIDS_CONFIG=<path>` puts the settings somewhere else, and `GRIDS_LOG=info` logs warnings to stderr.
 
+## Updates
+
+Grids asks GitHub for the newest release tag once at startup. When a newer version exists, a **新版本 / New version** button appears at the bottom left of the sidebar; click it to open the release page and download the new exe.
+
+The check sends nothing about you or your files: it is one GET to `api.github.com/repos/Joyi-code/grids/releases/latest` with no arguments and no identifiers, made by the system's `curl.exe` so the app itself links no networking code. Turn it off with **Check at startup** in the version popover; nothing else in the program uses the network. The source is open, so every line of it can be read here.
+
 ## Limits
 
 - Read-only folders are enforced inside Grids only.
 - Compare looks at names, sizes and dates, and at folders by existence; it does not recurse.
 - Today scans three levels below each pane's folder, up to 20,000 files.
 - Undo covers the operations Grids recorded; changes made in other programs are not recorded.
-- The app has no network code at all: no updates check, no telemetry.
+- The only network request is the version check; it can be turned off, and no telemetry or file upload exists.
 
 ## Credits
 
