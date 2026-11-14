@@ -170,6 +170,8 @@ pub struct Workspace {
     history: Option<history::HistoryPanel>,
     /// What the update check found; drives the sidebar pill and the popover.
     update: UpdateState,
+    /// Theme packs found in `themes/` beside the settings, plus the active one.
+    themes: Vec<(String, PathBuf)>,
     _subs: Vec<Subscription>,
 }
 
@@ -194,6 +196,18 @@ fn home_dir() -> PathBuf {
 
 /// Opens the releases page in the browser.
 fn open_releases() { let _ = grids_shell::open_url(RELEASES_PAGE); }
+
+/// Theme packs in `themes/` beside the settings file, plus the active one when
+/// it lives somewhere else.
+fn theme_packs(cx: &App) -> Vec<(String, PathBuf)> {
+    let shared = state::shared(cx);
+    let mut out = shared.config_path.parent().map(|d| grids_core::theme_pack::list(&d.join("themes"))).unwrap_or_default();
+    if let Some(dir) = &shared.config.theme && !out.iter().any(|(_, p)| p == dir) {
+        let name = grids_core::theme_pack::load(dir).map(|p| p.name).unwrap_or_else(|_| dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        out.push((name, dir.clone()));
+    }
+    out
+}
 
 /// The newest release tag when it beats this build: `Ok(None)` means up to
 /// date, `Err` that the request could not be made (offline, no curl, a
@@ -253,6 +267,7 @@ impl Workspace {
             lockers: None,
             history: None,
             update: UpdateState::Idle,
+            themes: theme_packs(cx),
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -763,6 +778,65 @@ impl Workspace {
             }))
     }
 
+    /// One row per theme pack, the built-in look first.
+    fn theme_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let current = state::shared(cx).config.theme.clone();
+        let mut rows = vec![self.theme_row(tr(cx, "默认", "Default").to_string(), None, current.is_none(), cx)];
+        for (name, path) in self.themes.clone() {
+            let on = current.as_ref() == Some(&path);
+            rows.push(self.theme_row(name, Some(path), on, cx));
+        }
+        rows
+    }
+
+    fn theme_row(&self, name: String, path: Option<PathBuf>, selected: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = SharedString::from(format!("theme-{name}"));
+        div().id(id).h(px(26.)).px(px(8.)).rounded(px(6.)).flex().items_center().gap(px(8.)).cursor_pointer()
+            .hover(|s| s.bg(Theme::fill_hover()))
+            .when(selected, |d| d.bg(Theme::fill_hover_strong()))
+            .child(icon(if selected { "check" } else { "square" }, 13., if selected { Theme::primary() } else { Theme::icon_muted() }))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(name))
+            .on_click(cx.listener(move |this, _, _, cx| this.apply_theme_pack(path.clone(), cx)))
+            .into_any_element()
+    }
+
+    /// The theme pack supplies a palette for each of these.
+    fn appearance_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cur = state::shared(cx).config.appearance;
+        let mut row = div().flex().gap(px(4.));
+        for (a, zh, en) in [(Appearance::System, "跟随系统", "System"), (Appearance::Light, "浅色", "Light"), (Appearance::Dark, "深色", "Dark")] {
+            row = row.child(self.appearance_btn(a, tr(cx, zh, en), cur, cx));
+        }
+        row
+    }
+
+    fn appearance_btn(&self, a: Appearance, label: &'static str, cur: Appearance, cx: &mut Context<Self>) -> AnyElement {
+        let id = SharedString::from(format!("appearance-{label}"));
+        div().id(id).h(px(24.)).px(px(10.)).rounded(px(6.)).flex().items_center().cursor_pointer().text_size(px(12.))
+            .when(cur == a, |d| d.bg(Theme::primary().alpha(0.14)).text_color(Theme::primary()))
+            .when(cur != a, |d| d.text_color(Theme::text_caption()).hover(|s| s.bg(Theme::fill_hover())))
+            .child(label)
+            .on_click(cx.listener(move |this, _, window, cx| this.set_appearance(a, window, cx)))
+            .into_any_element()
+    }
+
+    fn set_appearance(&mut self, a: Appearance, window: &mut Window, cx: &mut Context<Self>) {
+        cx.global_mut::<Shared>().config.appearance = a;
+        self.apply_theme(window, cx);
+        self.schedule_save(cx);
+    }
+
+    /// Switches the theme pack and restarts: the icons are chosen at start-up.
+    fn apply_theme_pack(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        if state::shared(cx).config.theme == path { return }
+        cx.global_mut::<Shared>().config.theme = path;
+        self.save_now(cx);
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).env_remove("GRIDS_THEME").spawn();
+        }
+        cx.quit();
+    }
+
     /// "v0.9.0" at the bottom left (the sidebar's foot, or the status bar's
     /// start while the sidebar is hidden); opens the version popover.
     fn version_label(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -833,9 +907,15 @@ impl Workspace {
                         .child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器", "Multi-pane file manager")))),
             )
             .child(
+                div().px(px(14.)).pb(px(4.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
+                    .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string())),
+            )
+            .child(div().px(px(14.)).pt(px(4.)).pb(px(2.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr(cx, "主题", "Theme")))
+            .child(div().px(px(8.)).flex().flex_col().gap(px(1.)).children(self.theme_rows(cx)))
+            .child(div().px(px(14.)).pt(px(8.)).pb(px(2.)).text_size(px(theme::UI_SMALL)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr(cx, "外观", "Appearance")))
+            .child(div().px(px(14.)).pb(px(6.)).child(self.appearance_row(cx)))
+            .child(
                 div().px(px(14.)).pb(px(6.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
-                    .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string()))
-                    .when_some(theme::pack_name().map(str::to_string), |d, name| d.child(row(tr(cx, "主题", "Theme"), name)))
                     .child(self.update_row(cx))
                     .child(self.check_updates_toggle(cx)),
             )
@@ -1731,4 +1811,5 @@ fn mini_layout(cols: &[usize], on: bool) -> Div {
     }
     d
 }
+
 

@@ -52,9 +52,6 @@ static PACK: std::sync::OnceLock<grids_core::theme_pack::ThemePack> = std::sync:
 /// Applies a theme pack for this run; call before the window opens.
 pub fn set_pack(pack: grids_core::theme_pack::ThemePack) { let _ = PACK.set(pack); }
 
-/// The loaded pack's name, if any.
-pub fn pack_name() -> Option<&'static str> { PACK.get().map(|p| p.name.as_str()) }
-
 /// A colour from the active pack for the current mode.
 fn packed(f: impl Fn(&grids_core::theme_pack::Palette) -> Option<grids_core::theme_pack::Rgba>) -> Option<Hsla> {
     let p = PACK.get()?;
@@ -363,5 +360,6 @@ pub fn kind_icon(k: grids_core::FileKind) -> &'static str {
         Other => "file",
     }
 }
+
 
 
