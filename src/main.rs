@@ -27,6 +27,8 @@ fn main() {
     // Simplified Chinese by default; GRIDS_LANG=en switches to English.
     if let Some(l) = std::env::var_os("GRIDS_LANG") { config.lang = if l == "en" { Lang::En } else { Lang::Zh } }
     let (w, h) = config.window.unwrap_or((1360., 860.));
+    // The product name the interface and the taskbar show, in its language.
+    let brand = if config.lang == Lang::En { "PaneBoard" } else { "文件看板" };
     Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
         input::bind_keys(cx);
         pane::bind_keys(cx);
@@ -40,7 +42,7 @@ fn main() {
                 app_id: Some("grids".into()),
                 window_decorations: if cfg!(target_os = "linux") { Some(WindowDecorations::Client) } else { None },
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Grids".into()),
+                    title: Some(brand.into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(14.), px(ui::HEADER_H / 2. - 7.))),
                 }),

@@ -320,7 +320,7 @@ impl Workspace {
 
     /// An edit was refused in a read-only folder: say so, offer to unlock.
     fn show_locked(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        let msg = tr(cx, "此文件夹已设为只读（仅在 Grids 内生效）", "This folder is read-only (inside Grids only)").to_string();
+        let msg = if state::en(cx) { format!("This folder is read-only (inside {} only)", state::brand(cx)) } else { format!("此文件夹已设为只读（仅在{}内生效）", state::brand(cx)) };
         self.show_toast(msg, cx);
         self.toast_unlock = Some(root);
     }
@@ -481,7 +481,7 @@ impl Workspace {
         let en = state::en(cx);
         let cfg = &state::shared(cx).config;
         let sidebar_open = cfg.sidebar_open;
-        let title = cfg.session_name.clone().unwrap_or_else(|| "Grids".into());
+        let title = cfg.session_name.clone().unwrap_or_else(|| state::brand(cx).into());
         let appearance = cfg.appearance;
         let l = &self.layout;
         let theme_icon = match appearance { Appearance::System => "sun-moon", Appearance::Light => "sun", Appearance::Dark => "moon" };
@@ -607,7 +607,7 @@ impl Workspace {
                 div().flex().items_center().gap(px(12.)).p(px(20.)).pb(px(12.))
                     .child(img("icon/grids-48.png").size(px(40.)).flex_none())
                     .child(div().flex_1().flex().flex_col().gap(px(2.))
-                        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(format!("Grids {}", env!("CARGO_PKG_VERSION"))))
+                        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(format!("{} {}", state::brand(cx), env!("CARGO_PKG_VERSION"))))
                         .child(div().text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器 · MIT 许可证", "Multi-pane file manager · MIT licence"))))
                     .child(header_icon("about-close", "x", 28., 16.).tip(tr(cx, "关闭", "Close"), Some("Esc")).on_click(cx.listener(|this, _, window, cx| this.close_about(window, cx)))),
             )
@@ -700,7 +700,7 @@ impl Workspace {
                 div().flex().items_center().gap(px(10.)).px(px(14.)).pt(px(10.)).pb(px(8.))
                     .child(img("icon/grids-48.png").size(px(32.)).flex_none())
                     .child(div().flex().flex_col()
-                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Grids"))
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(state::brand(cx)))
                         .child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器", "Multi-pane file manager")))),
             )
             .child(
@@ -1114,7 +1114,7 @@ impl Workspace {
                 // The sidebar's own header row: the toggle, level with the plane's title.
                 div().h(px(HEADER_H)).flex_none().flex().items_center().pl(px(16.)).title_bar()
                     .child(header_icon("toggle-sidebar", "panel-left-close", 28., 17.).tip(tr(cx, "收起侧栏", "Hide sidebar"), Some("Ctrl+B")).on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))))
-                    .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(img("icon/grids-48.png").size(px(20.)).flex_none()).child(div().font_weight(FontWeight::SEMIBOLD).child("Grids"))),
+                    .child(div().ml(px(8.)).flex().items_center().gap(px(6.)).text_color(Theme::sidebar_text()).child(img("icon/grids-48.png").size(px(20.)).flex_none()).child(div().font_weight(FontWeight::SEMIBOLD).child(state::brand(cx)))),
             )
             .child(col)
             .child(div().flex_none().h(px(40.)).px(px(SB_X)).flex().items_center().child(self.version_label(cx)))

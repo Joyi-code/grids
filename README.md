@@ -6,6 +6,8 @@ A multi-pane file manager for Windows, drawn entirely by the app: up to 16 panes
 
 This repository is a fork and a rewrite. Grids began as [efww/grids](https://github.com/efww/grids), a Q-Dir style manager whose panes were embedded Windows Explorer views. Here the window, the file lists and every menu and dialog are drawn by the app itself with [GPUI](https://www.gpui.rs), the Rust UI framework behind Zed. No Explorer view is embedded anywhere, and the program is a single exe of about 5.5 MB that never touches the network.
 
+In the window the app calls itself **文件看板** in Chinese and **PaneBoard** in English. The repository, the executable (`grids.exe`) and the settings file keep the name Grids.
+
 ![Grids with four panes and the sidebar](docs/screenshots/overview.png)
 
 The screenshots in this README show a mock project tree, not a real desktop.
@@ -115,6 +117,14 @@ Enter runs a command or opens a folder, Ctrl+Enter opens a folder in the next pa
 | Ctrl+Z | Undo the last operation |
 | Ctrl+↑ / Ctrl+↓ | Move the cursor without changing the selection |
 
+## Download
+
+Get `grids.exe` from [Releases](https://github.com/Joyi-code/grids/releases/latest), put it in any folder and run it. Nothing else needs installing, and the C runtime is linked statically.
+
+The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
+
+Windows 10 (1903 or later) or Windows 11, x64.
+
 ## Running it
 
 Build it with the Rust toolchain from [rustup](https://rustup.rs) (the version is pinned in `rust-toolchain.toml`) and the Windows SDK; GPUI compiles its shaders with the SDK's `fxc.exe`.
@@ -131,9 +141,7 @@ cargo build --release --locked
 
 `build.cmd` also points `GPUI_FXC_PATH` at the newest installed SDK, as CI does. Tests: `cargo test --release --locked --workspace`.
 
-The result is a single `grids.exe`; put it in any folder and run it. There is no prebuilt download for this version yet, so build it as above. Settings (`grids-gpui.json`) and the operation journal (`grids-journal.jsonl`) are written next to the exe, so the folder has to be writable. `GRIDS_CONFIG=<path>` puts the settings somewhere else, and `GRIDS_LOG=info` logs warnings to stderr.
-
-Windows 10 (1903 or later) or Windows 11, x64. The C runtime is linked statically, so a clean Windows starts it without the Visual C++ Redistributable.
+The result is a single `grids.exe`; put it in any folder and run it. Settings (`grids-gpui.json`) and the operation journal (`grids-journal.jsonl`) are written next to the exe, so the folder has to be writable. `GRIDS_CONFIG=<path>` puts the settings somewhere else, and `GRIDS_LOG=info` logs warnings to stderr.
 
 ## Limits
 
