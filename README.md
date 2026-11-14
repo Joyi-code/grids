@@ -1,6 +1,6 @@
 # Grids
 
-**English** | [简体中文](README.zh.md) | [한국어](README.ko.md)
+**English** | [简体中文](README.zh.md)
 
 A multi-pane file manager for Windows, drawn entirely by the app: up to 16 panes in one window, layouts you shape by dragging, and a few things Explorer does not do. A Today view, live change highlights, read-only folders that cannot be dragged out, linked panes that compare two folder trees, and a shelf for carrying files between panes.
 
