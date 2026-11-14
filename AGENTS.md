@@ -67,7 +67,8 @@ licence obligation, not tracking upstream.
   runs against a user's disk.
 - **Size budget.** The release profile is size-first (`opt-level = "z"`, fat
   LTO, one codegen unit; only `gpui` and `taffy` get `opt-level = 3`). CI fails
-  when `grids.exe` passes 8,000,000 bytes, and the `size` job reports per-crate
+  when `grids.exe` passes 10,000,000 bytes (about 1.9 MB of that is the theme
+  embedded so the release is one exe), and the `size` job reports per-crate
   growth. Prefer std over a new crate, and delete code before adding a feature
   flag for it.
 - **Static C runtime.** `.cargo/config.toml` links the CRT statically so a clean
@@ -120,3 +121,4 @@ Build it, run the tests, and run clippy on the layer you touched. If the change
 is large, check `cargo tree` for new crates and look at the CI `size` job's
 per-crate table. If a user-visible string, shortcut or setting changed, README
 changed with it.
+

@@ -29,6 +29,8 @@ fn main() {
     let (w, h) = config.window.unwrap_or((1360., 860.));
     // The product name the interface and the taskbar show, in its language.
     let brand = if config.lang == Lang::En { "PaneBoard" } else { "文件看板" };
+    // The theme travels inside the exe: lay it down beside the settings first.
+    if let Some(dir) = path.parent() { theme::install_bundled(dir); }
     // A theme pack: GRIDS_THEME wins over the settings file.
     let theme_dir = std::env::var_os("GRIDS_THEME").map(std::path::PathBuf::from).or_else(|| config.theme.clone());
     if let Some(dir) = &theme_dir {

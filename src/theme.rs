@@ -50,6 +50,21 @@ static DARK: AtomicBool = AtomicBool::new(false);
 static PACK: std::sync::OnceLock<grids_core::theme_pack::ThemePack> = std::sync::OnceLock::new();
 static PACK_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+include!(concat!(env!("OUT_DIR"), "/bundled_theme.rs"));
+
+/// Writes the bundled theme to `<dir>/themes/cream-cat` when it is not there
+/// yet, so a single exe carries its own theme. Existing folders are left alone.
+pub fn install_bundled(dir: &std::path::Path) -> bool {
+    let root = dir.join("themes").join("cream-cat");
+    if root.join("theme.json").is_file() { return false }
+    for (rel, bytes) in THEME_FILES {
+        let p = root.join(rel);
+        if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+        let _ = std::fs::write(&p, bytes);
+    }
+    root.join("theme.json").is_file()
+}
+
 /// Applies a theme pack for this run; call before the window opens.
 pub fn set_pack(pack: grids_core::theme_pack::ThemePack, dir: std::path::PathBuf) {
     let _ = PACK_DIR.set(dir);

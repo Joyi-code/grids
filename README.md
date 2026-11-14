@@ -119,7 +119,7 @@ Enter 执行命令或打开目录，Ctrl+Enter 在下一格打开该目录。
 
 ## 下载
 
-在 [Releases](https://github.com/Joyi-code/grids/releases/latest) 下载 `grids-windows-x64.zip`，解压到任意目录，运行里面的 `grids.exe`。压缩包自带主题 `themes\cream-cat`，打开版本弹层就能选，不用自己放文件。只想要单文件也可以单独下载 `grids.exe`，那是内置外观，没有主题。
+在 [Releases](https://github.com/Joyi-code/grids/releases/latest) 下载 `grids-版本号.exe`，放到任意目录运行即可，只有一个文件。主题「奶油猫咪」已经打包进 exe：第一次运行会在旁边生成 `themes\cream-cat\`，点左下角版本号就能选，不用自己放文件。
 
 不需要安装，C 运行库已静态链接。程序未做代码签名，首次运行 Windows SmartScreen 可能提示：点「更多信息」→「仍要运行」。
 
@@ -167,5 +167,6 @@ Grids 是 [efww/grids](https://github.com/efww/grids)（MIT）的 fork，上游�
 
 ## 主题包
 
-主题是一个文件夹，里面放 `theme.json`（浅色与深色两套色板）、`icons/`、`types/` 与插画。发布压缩包已经带了一套 `cream-cat`，放在 `themes\` 下，打开即见；自己加主题时把新文件夹放进同一个 `themes\` 目录。打开版本弹层即可切换，选完自动重启生效；外观的跟随系统、浅色、深色三档不受影响。
+主题是一个文件夹，里面放 `theme.json`（浅色与深色两套色板）、`icons/`、`types/` 与插画。奶油猫咪已经编译进 exe，第一次运行自动写到 exe 同目录的 `themes\cream-cat\`；自己加主题时把新文件夹放进同一个 `themes\` 目录。打开版本弹层即可切换，选完自动重启生效；外观的跟随系统、浅色、深色三档不受影响。
+
 

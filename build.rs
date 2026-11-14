@@ -27,6 +27,39 @@ fn main() {
             .manifest_optional()
             .expect("grids.rc: resource compile failed");
     }
+
+    bundle_theme();
+}
+
+/// Emits `bundled_theme.rs`: every file of `themes/cream-cat`, embedded so the
+/// app can lay the theme down on first run and ship as one exe.
+fn bundle_theme() {
+    use std::path::Path;
+    let root = Path::new("themes/cream-cat");
+    println!("cargo:rerun-if-changed=themes/cream-cat");
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, base, out)
+            } else if let Ok(rel) = p.strip_prefix(base) {
+                out.push((rel.to_string_lossy().replace('\\', "/"), p))
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    let mut src = String::from("/// The bundled theme's files, written out on first run.\npub static THEME_FILES: &[(&str, &[u8])] = &[\n");
+    for (rel, p) in &files {
+        let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        src.push_str(&format!("    ({:?}, include_bytes!({:?})),\n", rel, abs.to_string_lossy()));
+    }
+    src.push_str("];\n");
+    let out = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("bundled_theme.rs");
+    std::fs::write(out, src).expect("writing bundled_theme.rs");
 }
 
 /// Days since 1970-01-01 to (year, month, day), proleptic Gregorian
