@@ -899,13 +899,22 @@ impl Workspace {
             .key_context("Dialog")
             .on_action(cx.listener(|this, _: &DialogCancel, window, cx| this.close_version_pop(window, cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div().flex().items_center().gap(px(10.)).px(px(14.)).pt(px(10.)).pb(px(8.))
-                    .child(img("icon/grids-48.png").size(px(32.)).flex_none())
-                    .child(div().flex().flex_col()
-                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(state::brand(cx)))
-                        .child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器", "Multi-pane file manager")))),
-            )
+            .child({
+                // A theme pack's banner replaces the icon-and-name header.
+                let banner = if theme::dark() && theme::has("about-dark.png") { Some("theme/about-dark.png") }
+                    else if theme::has("about.png") { Some("theme/about.png") } else { None };
+                match banner {
+                    Some(name) => div().px(px(10.)).pt(px(10.))
+                        .child(img(name).w_full().h(px(58.)).object_fit(ObjectFit::Contain))
+                        .into_any_element(),
+                    None => div().flex().items_center().gap(px(10.)).px(px(14.)).pt(px(10.)).pb(px(8.))
+                        .child(img("icon/grids-48.png").size(px(32.)).flex_none())
+                        .child(div().flex().flex_col()
+                            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(state::brand(cx)))
+                            .child(div().text_size(px(theme::UI_SMALL)).text_color(Theme::text_caption()).child(tr(cx, "多窗格文件管理器", "Multi-pane file manager"))))
+                        .into_any_element(),
+                }
+            })
             .child(
                 div().px(px(14.)).pb(px(4.)).text_size(px(theme::UI_SMALL)).flex().flex_col()
                     .child(row(tr(cx, "版本", "Version"), env!("CARGO_PKG_VERSION").to_string())),
