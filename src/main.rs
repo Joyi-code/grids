@@ -10,6 +10,7 @@ mod pane;
 mod state;
 mod theme;
 mod thumbs;
+mod update;
 mod ui;
 mod workspace;
 
@@ -19,6 +20,10 @@ use grids_core::Config;
 use std::path::Path;
 
 fn main() {
+    // A copy of this exe swaps in a downloaded update once the window is gone.
+    if let Some(code) = update::apply_from_args() { std::process::exit(code) }
+    // A previous swap leaves the replaced exe behind; it is no longer needed.
+    if let Ok(exe) = std::env::current_exe() { let _ = std::fs::remove_file(exe.with_extension("old.exe")); }
     install_crash_log();
     env_logger_lite();
     let path = Config::default_path();
@@ -151,4 +156,5 @@ fn install_crash_log() {
 fn crash_log_path() -> Option<std::path::PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("grids-crash.log"))
 }
+
 
