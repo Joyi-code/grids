@@ -2066,7 +2066,7 @@ checksum = "12101ecc8225ea6d675bc70263074eab6169079621c2186fe0c66590b2df9681"
 
 [[package]]
 name = "grids"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "anyhow",
  "chrono",
