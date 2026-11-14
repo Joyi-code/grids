@@ -1958,16 +1958,23 @@ impl Render for PaneView {
             Some(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(err.clone()).into_any_element())
         } else if n == 0 && !self.loading {
             let msg = if !self.state.filter.is_empty() { if en { "No matching items." } else { "没有匹配的项目。" } } else if en { "This folder is empty." } else { "此文件夹为空。" }.to_string();
-            let art = if self.state.filter.is_empty() {
-                let name = if theme::dark() && theme::has("empty-dark-2x.png") { "theme/empty-dark-2x.png" } else { "theme/empty-2x.png" };
-                theme::has(name.trim_start_matches("theme/")).then(|| img(name).w(px(180.)).h(px(120.)).object_fit(ObjectFit::Contain).into_any_element())
-            } else { None };
+            let pick = |light: &'static str, dark: &'static str| -> Option<&'static str> {
+                if theme::dark() && theme::has(dark) { Some(dark) } else if theme::has(light) { Some(light) } else { None }
+            };
+            let art = if self.state.filter.is_empty() { pick("empty-2x.png", "empty-dark-2x.png") } else { pick("empty-search.png", "empty-search-dark.png") }
+                .map(|n| SharedString::from(format!("theme/{n}")))
+                .map(|n| img(n).w(px(180.)).h(px(120.)).object_fit(ObjectFit::Contain).into_any_element());
             Some(div().absolute().inset_0().flex().flex_col().items_center().justify_center().gap(px(10.)).px(px(12.))
                 .children(art)
                 .child(div().text_color(Theme::text_caption()).child(msg)).into_any_element())
         } else { None };
         let missing = self.link.as_ref().and_then(|l| l.missing.clone()).map(|m| {
+            let art = [("missing.png", "missing-dark.png")]
+                .iter()
+                .find(|(light, dark)| theme::has(light) && (!theme::dark() || theme::has(dark)))
+                .map(|(light, dark)| if theme::dark() { *dark } else { *light });
             div().absolute().inset_0().bg(Theme::bg_body()).flex().flex_col().items_center().justify_center().gap(px(10.)).px(px(16.))
+                .children(art.map(|n| img(SharedString::from(format!("theme/{n}"))).w(px(180.)).h(px(120.)).object_fit(ObjectFit::Contain)))
                 .child(icon("folder-x", 28., Theme::icon_muted()))
                 .child(div().text_color(Theme::text()).child(if en { "The matching folder doesn't exist" } else { "对应文件夹不存在" }))
                 .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(Theme::text_caption()).child(ui_text(m.display().to_string())))
@@ -2180,5 +2187,6 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
 
 

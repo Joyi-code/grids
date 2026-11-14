@@ -194,6 +194,18 @@ fn home_dir() -> PathBuf {
     grids_shell::known_folders().into_iter().find(|k| k.kind == KnownFolderKind::Home).map(|k| k.path).unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
 
+/// The pack's window backdrop, when it ships one.
+fn theme_backdrop() -> Option<Img> {
+    let name = if theme::dark() && theme::has("background-dark.png") { "background-dark.png" } else if theme::has("background.png") { "background.png" } else { return None };
+    Some(img(SharedString::from(format!("theme/{name}"))).absolute().inset_0().object_fit(ObjectFit::Cover))
+}
+
+/// The pack's little sidebar illustration, above the version label.
+fn sidebar_foot() -> Option<Img> {
+    let name = if theme::dark() && theme::has("sidebar-foot-dark.png") { "sidebar-foot-dark.png" } else if theme::has("sidebar-foot.png") { "sidebar-foot.png" } else { return None };
+    Some(img(SharedString::from(format!("theme/{name}"))).w(px(150.)).h(px(75.)).object_fit(ObjectFit::Contain).mb(px(2.)))
+}
+
 /// Opens the releases page in the browser.
 fn open_releases() { let _ = grids_shell::open_url(RELEASES_PAGE); }
 
@@ -1332,6 +1344,7 @@ impl Workspace {
             .child(col)
             .child(
                 div().flex_none().px(px(SB_X)).pb(px(4.)).flex().flex_col().gap(px(6.))
+                    .children(sidebar_foot())
                     .children(self.update_pill(cx))
                     .child(self.version_label(cx)),
             )
@@ -1734,6 +1747,8 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .bg(Theme::window())
+            // A theme pack's backdrop sits behind the sidebar and the panes.
+            .children(theme_backdrop())
             .font_family(theme::UI_FONT)
             .text_size(px(theme::UI_SIZE))
             .text_color(Theme::text())

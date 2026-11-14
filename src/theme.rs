@@ -56,9 +56,6 @@ pub fn set_pack(pack: grids_core::theme_pack::ThemePack, dir: std::path::PathBuf
     let _ = PACK.set(pack);
 }
 
-/// True when a theme pack is active.
-pub fn active() -> bool { PACK.get().is_some() }
-
 /// The active pack's folder.
 pub fn dir() -> Option<&'static std::path::Path> { PACK_DIR.get().map(|p| p.as_path()) }
 
@@ -373,6 +370,7 @@ pub fn kind_icon(k: grids_core::FileKind) -> &'static str {
         Other => "file",
     }
 }
+
 
 
 
