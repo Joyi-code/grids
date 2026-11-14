@@ -94,6 +94,11 @@ licence obligation, not tracking upstream.
   only when it explains a non-obvious cause.
 - The version stays in the 0.9 line: 0.9.8, 0.9.9, 0.9.10, and so on. Never
   move to 1.0.0 unless the user asks for it.
+- Only the newest release stays public. When a release is published, turn every
+  older one into a draft with `gh api -X PATCH repos/Joyi-code/grids/releases/<id>
+  -F draft=true` (the typed `-F` matters; `-f` string is ignored). Drafts keep
+  their notes and assets but disappear from the public releases page, and
+  `releases/latest` still returns the published one.
 - Runtime state – `grids-gpui.json`, `grids-journal.jsonl`, `sessions/` – is
   written next to the exe and is gitignored. Never commit it, and never commit a
   path or fixture that only exists on your machine.
