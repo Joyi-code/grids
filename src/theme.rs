@@ -264,7 +264,7 @@ impl Theme {
     pub fn text_disabled() -> Hsla { ca(craft::N900, 0.3) }
     pub fn primary() -> Hsla { c(craft::B500) }
     /// Content planes: white.
-    pub fn bg_body() -> Hsla { c(craft::N00) }
+    pub fn bg_body() -> Hsla { if dark() { rgb(0x151517).into() } else { c(craft::N00) } }
     pub fn line_divider() -> Hsla { ca(craft::N1000, 0.06) }
     pub fn line_border() -> Hsla { ca(craft::N1000, 0.08) }
     pub fn fill_hover() -> Hsla { ca(craft::N1000, 0.045) }
@@ -278,7 +278,7 @@ impl Theme {
     pub fn caret() -> Hsla { c(craft::B500) }
     pub fn star() -> Hsla { c(0xf5a524) }
     /// The window surface: the sidebar material behind the content.
-    pub fn window() -> Hsla { c(craft::WINDOW) }
+    pub fn window() -> Hsla { if dark() { rgb(0x1b1b1c).into() } else { c(craft::WINDOW) } }
     /// Sidebar section titles.
     pub fn sidebar_section() -> Hsla { c(0x333739) }
     pub fn sidebar_text() -> Hsla { ca(craft::N900, 0.85) }
@@ -348,4 +348,5 @@ pub fn kind_icon(k: grids_core::FileKind) -> &'static str {
         Other => "file",
     }
 }
+
 
