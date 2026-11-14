@@ -28,8 +28,11 @@ v1 包里 `types/*.svg` 的彩色底块不会生效，程序用的是同目录�
 | --- | --- | --- |
 | `about.png` / `about-dark.png` | 版本弹层顶部横幅 | 640×120，低对比，透明或纯色底 |
 | `empty-2x.png` / `empty-dark-2x.png` | 空文件夹插画 | 480×320（显示 180×120） |
-| `app.ico` | 任务栏与窗口图标 | 16/24/32/48/64/128/256 |
-| `background.png` / `background-dark.png` | 窗口背景（接入中） | 1920×1080 或 512×512 无缝平铺，低对比 |
+| `background.png` / `background-dark.png` | 窗口背景（侧栏与窗格后面） | 1920×1080 或 512×512 无缝平铺，低对比 |
+
+### 不需要交：`app.ico`
+
+任务栏与窗口图标是程序自带的固定图标，**主题包里的 `app.ico` 不会被程序读取**，换主题也不会变。这个文件只在你自己替换 `grids.exe` 的文件图标时才有用，主题包可以带，也可以不带。
 
 ### 可选
 
@@ -101,15 +104,15 @@ v1 包里 `types/*.svg` 的彩色底块不会生效，程序用的是同目录�
 ```
 cream-cat/
   theme.json
-  app.ico
   app.png                   1024×1024
   app-sizes/app-48.png
   brand.svg
   about.png                 about-dark.png
   background.png            background-dark.png
   empty-2x.png              empty-dark-2x.png
-  empty-search.png
-  missing.png
+  empty-search.png          empty-search-dark.png
+  missing.png               missing-dark.png
+  sidebar-foot.png          sidebar-foot-dark.png
   icons/                    89 个单色 SVG
   types/                    每种类型 256 PNG，浅深各一份
 ```
@@ -125,8 +128,8 @@ cream-cat/
 5. 没有外部字体、滤镜、外链
 6. `theme.json` 的 11 个字段两套都给
 
-## 8. v1 包已经可用的部分
+## 8. v2 包已经全部用上
 
-`cream-cat-workspace-theme-v1` 现在能直接跑：色板、89 个工具栏图标、48px 标识、12 种类型图标、空状态插画、关于横幅都生效。
+`cream-cat-generated-theme-v2` 里这些都已生效：色板、89 个工具栏图标、48px 标识、256 类型图（列表与图标视图）、空文件夹与搜索无结果插画、联动缺目录插画、关于横幅、侧栏插画、窗口背景。
 
-还没生效的：`background*.png`（窗口背景尚未接）、`app.ico`（任务栏图标要改代码）、`brand.svg`（当前用 app-48.png）、`types/*.svg`（彩色 SVG 不生效，用 PNG）。
+程序不读的只有：`app.ico`（任务栏图标固定）、`brand.svg`（当前用 `app-48.png`）、`types/*.svg`（彩色 SVG 不生效，用 PNG）、`previews/`、`manifest.json`、`validation.json`。
