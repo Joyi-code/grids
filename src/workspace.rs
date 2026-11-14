@@ -1390,7 +1390,10 @@ impl Workspace {
     fn render_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = self.grid_bounds.clone();
         let mut grid = div().relative().flex_1().min_w_0().min_h_0().flex()
-            .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full());
+            .child(canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full())
+            // The pack's backdrop stays under the panes: its left edge would
+            // otherwise draw a line down the sidebar.
+            .children(theme_backdrop());
         if let Some(t) = self.render_today(cx) { return grid.child(t) }
         if let Some(m) = self.maximized.and_then(|m| self.panes.get(m)) {
             return grid.child(div().flex_1().min_w_0().min_h_0().child(m.clone()));
@@ -1778,8 +1781,6 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .bg(Theme::window())
-            // A theme pack's backdrop sits behind the sidebar and the panes.
-            .children(theme_backdrop())
             .font_family(theme::UI_FONT)
             .text_size(px(theme::UI_SIZE))
             .text_color(Theme::text())
@@ -1866,6 +1867,7 @@ fn mini_layout(cols: &[usize], on: bool) -> Div {
     }
     d
 }
+
 
 
 

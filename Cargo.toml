@@ -1,6 +1,6 @@
 [package]
 name = "grids"
-version = "0.9.5"
+version = "0.9.6"
 edition = "2024"
 description = "Fast multi-pane file manager, drawn with GPUI"
 license = "MIT"
@@ -72,6 +72,7 @@ panic = "abort"
 opt-level = 3
 [profile.release.package.taffy]
 opt-level = 3
+
 
 
 
