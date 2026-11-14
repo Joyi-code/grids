@@ -22,6 +22,30 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     false
 }
 
+
+/// The newest release's Windows executable: where it lives, and what it must
+/// hash to. `digest` is the hex SHA-256 (GitHub's `sha256:` prefix stripped).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Release { pub version: String, pub url: String, pub digest: String, pub size: u64 }
+
+/// Reads the first `.exe` asset out of a GitHub "latest release" reply, with
+/// its digest, so an update can be downloaded and checked. None when the
+/// release has no exe asset or no digest.
+pub fn parse_release(json: &str) -> Option<Release> {
+    let version = parse_latest(json)?;
+    for chunk in json.split("{\"url\":\"").skip(1) {
+        let (Some(url), Some(digest)) = (field(chunk, "browser_download_url"), field(chunk, "digest")) else { continue };
+        if !url.ends_with(".exe") || !digest.starts_with("sha256:") { continue }
+        let size = field(chunk, "size").and_then(|s| s.parse().ok()).unwrap_or(0);
+        return Some(Release { version, url: url.to_string(), digest: digest.trim_start_matches("sha256:").to_lowercase(), size })
+    }
+    None
+}
+
+fn field<'a>(chunk: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("\"{key}\":\"");
+    chunk.split(&pat).nth(1)?.split('"').next()
+}
 fn parts(v: &str) -> Vec<u64> {
     v.split(['.', '-', '+']).take(3).map(|p| p.parse().unwrap_or(0)).collect()
 }
@@ -50,3 +74,4 @@ mod tests {
         assert!(!is_newer("", "0.9.0"));
     }
 }
+

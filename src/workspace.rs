@@ -181,13 +181,13 @@ enum UpdateState {
     Idle,
     Checking,
     Current,
-    Newer(String),
+    Newer(version::Release),
+    Downloading,
     Failed,
 }
 
 /// The one address the app asks about versions, and where its releases live.
 const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Joyi-code/grids/releases/latest";
-const RELEASES_PAGE: &str = "https://github.com/Joyi-code/grids/releases/latest";
 const PROJECT_PAGE: &str = "https://github.com/Joyi-code/grids";
 
 fn home_dir() -> PathBuf {
@@ -206,9 +206,6 @@ fn sidebar_foot() -> Option<Img> {
     Some(img(SharedString::from(format!("theme/{name}"))).w(px(150.)).h(px(75.)).object_fit(ObjectFit::Contain).mb(px(2.)))
 }
 
-/// Opens the releases page in the browser.
-fn open_releases() { let _ = grids_shell::open_url(RELEASES_PAGE); }
-
 /// Theme packs in `themes/` beside the settings file, plus the active one when
 /// it lives somewhere else.
 fn theme_packs(cx: &App) -> Vec<(String, PathBuf)> {
@@ -224,7 +221,7 @@ fn theme_packs(cx: &App) -> Vec<(String, PathBuf)> {
 /// The newest release tag when it beats this build: `Ok(None)` means up to
 /// date, `Err` that the request could not be made (offline, no curl, a
 /// rate-limited GitHub). Only the GET leaves the machine.
-fn fetch_latest() -> Result<Option<String>, ()> {
+fn fetch_latest() -> Result<Option<version::Release>, ()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -236,8 +233,8 @@ fn fetch_latest() -> Result<Option<String>, ()> {
             .map_err(|_| ())?;
         if !out.status.success() { return Err(()) }
         let body = String::from_utf8_lossy(&out.stdout);
-        let latest = version::parse_latest(&body).ok_or(())?;
-        Ok(version::is_newer(&latest, env!("CARGO_PKG_VERSION")).then_some(latest))
+        let release = version::parse_release(&body).ok_or(())?;
+        Ok(version::is_newer(&release.version, env!("CARGO_PKG_VERSION")).then_some(release))
     }
     #[cfg(not(windows))]
     { Err(()) }
@@ -730,18 +727,22 @@ impl Workspace {
         }).detach();
     }
 
-    /// "新版本 0.9.1" above the version label, while a newer release is known.
+    /// "新版本 0.9.1" above the version label: one click downloads and swaps it in.
     fn update_pill(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let UpdateState::Newer(v) = &self.update else { return None };
-        let label = if state::en(cx) { format!("New version {v}") } else { format!("新版本 {v}") };
+        let label = match &self.update {
+            UpdateState::Newer(r) => if state::en(cx) { format!("Update to {}", r.version) } else { format!("更新到 {}", r.version) },
+            UpdateState::Downloading => if state::en(cx) { "Downloading…".to_string() } else { "正在下载…".to_string() },
+            _ => return None,
+        };
+        let busy = self.update == UpdateState::Downloading;
         Some(
             div().id("update-pill").h(px(28.)).px(px(8.)).rounded(px(7.)).flex().items_center().gap(px(6.)).cursor_pointer()
                 .bg(Theme::primary().alpha(0.12)).text_color(Theme::primary()).text_size(px(12.)).font_weight(FontWeight::MEDIUM)
                 .hover(|s| s.bg(Theme::primary().alpha(0.2)))
                 .child(icon("download", 14., Theme::primary()))
                 .child(label)
-                .tip(tr(cx, "打开下载页面", "Open the download page"), None)
-                .on_click(cx.listener(|_, _, _, _| open_releases())),
+                .tip(tr(cx, "下载并重启到新版本", "Download and restart into the new version"), None)
+                .when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.start_update(cx)))),
         )
     }
 
@@ -753,7 +754,8 @@ impl Workspace {
             UpdateState::Idle => (if en { "Check for updates".to_string() } else { "检查更新".to_string() }, false),
             UpdateState::Checking => (if en { "Checking…".to_string() } else { "正在检查…".to_string() }, false),
             UpdateState::Current => (if en { "Up to date".to_string() } else { "已是最新版本".to_string() }, false),
-            UpdateState::Newer(v) => (if en { format!("Version {v} is available") } else { format!("发现新版本 {v}") }, true),
+            UpdateState::Newer(r) => (if en { format!("Update to {}", r.version) } else { format!("更新到 {}", r.version) }, true),
+            UpdateState::Downloading => (if en { "Downloading…".to_string() } else { "正在下载…".to_string() }, false),
             UpdateState::Failed => (if en { "Check failed, click to retry".to_string() } else { "检查失败，点击重试".to_string() }, true),
         };
         let retry = self.update == UpdateState::Idle || self.update == UpdateState::Failed;
@@ -767,7 +769,7 @@ impl Workspace {
                     .when(link, |d| d.child(icon("download", 13., Theme::primary())))
                     .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(text)),
             )
-            .when(link, |d| d.on_click(cx.listener(|_, _, _, _| open_releases())))
+            .when(link, |d| d.on_click(cx.listener(|this, _, _, cx| this.start_update(cx))))
             .when(retry, |d| d.on_click(cx.listener(|this, _, _, cx| this.check_update(cx))))
     }
 
@@ -847,6 +849,35 @@ impl Workspace {
             let _ = std::process::Command::new(exe).env_remove("GRIDS_THEME").spawn();
         }
         cx.quit();
+    }
+
+    /// Downloads the newer release, checks its hash, then hands the swap to a
+    /// copy of this exe and quits, so the window is gone before it happens.
+    fn start_update(&mut self, cx: &mut Context<Self>) {
+        let UpdateState::Newer(release) = self.update.clone() else { return };
+        let dir = state::shared(cx).config_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        self.update = UpdateState::Downloading;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (rel, dir) = (release.clone(), dir.clone());
+            let dest = dir.join(format!("grids-update-{}.exe", rel.version));
+            let (dest2, rel2) = (dest.clone(), rel.clone());
+            let ok = cx.background_executor().spawn(async move {
+                crate::update::download(&rel2.url, &dest2) && crate::update::verify(&dest2, &rel2.digest)
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                if !ok {
+                    this.update = UpdateState::Newer(release);
+                    this.show_toast(tr(cx, "下载或校验失败，请稍后重试", "Download or check failed, try again later").into(), cx);
+                    return;
+                }
+                let exe = std::env::current_exe().unwrap_or_default();
+                if crate::update::start_helper(&dest, &exe) { cx.quit() } else {
+                    this.update = UpdateState::Newer(release);
+                    this.show_toast(tr(cx, "无法启动更新程序", "Could not start the updater").into(), cx);
+                }
+            });
+        }).detach();
     }
 
     /// "v0.9.0" at the bottom left (the sidebar's foot, or the status bar's
@@ -1835,5 +1866,6 @@ fn mini_layout(cols: &[usize], on: bool) -> Div {
     }
     d
 }
+
 
 
