@@ -31,12 +31,12 @@ fn main() {
     bundle_theme();
 }
 
-/// Emits `bundled_theme.rs`: every file of `themes/cream-cat`, embedded so the
-/// app can lay the theme down on first run and ship as one exe.
+/// Emits `bundled_theme.rs`: every file of every pack under `themes/`, embedded
+/// so the app lays them down on first run and ships as one exe.
 fn bundle_theme() {
     use std::path::Path;
-    let root = Path::new("themes/cream-cat");
-    println!("cargo:rerun-if-changed=themes/cream-cat");
+    let root = Path::new("themes");
+    println!("cargo:rerun-if-changed=themes");
     fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         let mut entries: Vec<_> = rd.flatten().collect();
