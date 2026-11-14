@@ -1827,12 +1827,17 @@ impl PaneView {
         }
         let edge = ((g.icon * scale).round() as u32).min(256);
         let key: thumbs::Key = (e.path.clone(), e.modified, edge);
-        let thumb = thumbs::get(&key, cx).flatten();
+        // Images and videos keep their shell thumbnail; other types use the theme's icon.
+        let use_thumb = matches!(kind, grids_core::FileKind::Image | grids_core::FileKind::Video);
+        let thumb = if use_thumb { thumbs::get(&key, cx).flatten() } else { None };
         keys.insert(key);
         let picture = match thumb {
             Some(image) => img(image).size(px(g.icon)).object_fit(ObjectFit::Contain).into_any_element(),
-            None => div().size(px(g.icon)).flex().items_center().justify_center()
-                .child(icon(theme::kind_icon(kind), (g.icon * 0.72).round(), theme::kind_color(kind))).into_any_element(),
+            None => match type_img(kind, theme::dark()) {
+                Some(path) => img(path).size(px(g.icon)).object_fit(ObjectFit::Contain).into_any_element(),
+                None => div().size(px(g.icon)).flex().items_center().justify_center()
+                    .child(icon(theme::kind_icon(kind), (g.icon * 0.72).round(), theme::kind_color(kind))).into_any_element(),
+            },
         };
         let name = match renaming {
             Some(rn) => rename_box(rn).into_any_element(),
