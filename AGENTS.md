@@ -98,9 +98,10 @@ licence obligation, not tracking upstream.
   or `crates/shell` (some shell tests call the real Windows Shell: known
   folders, system icons, a file-operation round trip). `src/` has no tests by
   design; move testable behaviour down a layer instead.
-- README.md is the user-facing feature list. When behaviour, a shortcut or a
-  setting changes, update README.md (and keep README.zh.md in step; the language
-  link at the top of each file switches between them).
+- README.md is the user-facing feature list, in Simplified Chinese. When
+  behaviour, a shortcut or a setting changes, update README.md and keep
+  README.en.md in step; the language link at the top of each file switches
+  between them.
 
 ## Running it while you work
 
