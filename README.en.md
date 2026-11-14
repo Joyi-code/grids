@@ -119,9 +119,9 @@ Enter runs a command or opens a folder, Ctrl+Enter opens a folder in the next pa
 
 ## Download
 
-Get `grids.exe` from [Releases](https://github.com/Joyi-code/grids/releases/latest), put it in any folder and run it. Nothing else needs installing, and the C runtime is linked statically.
+Get `grids-windows-x64.zip` from [Releases](https://github.com/Joyi-code/grids/releases/latest), unzip it anywhere and run the `grids.exe` inside. The zip already carries the `themes\cream-cat` pack, so the version popover lists it with nothing to install. The bare `grids.exe` is also there for a single file: that one has the built-in look and no theme.
 
-The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
+Nothing else needs installing, and the C runtime is linked statically. The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
 
 Windows 10 (1903 or later) or Windows 11, x64.
 
@@ -167,4 +167,5 @@ Grids is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which was 
 
 ## Theme packs
 
-A theme is a folder with a `theme.json` (a light and a dark palette) plus `icons/` and `app.png`. Point `"theme"` in `grids-gpui.json` at it, or start the app with `GRIDS_THEME` set; Grids then uses its colours, toolbar icons and sidebar badge, falling back to the built-in ones for anything the pack leaves out. The version popover shows the active theme's name. The pack is read at startup, so restart to switch.
+A theme is a folder with a `theme.json` (a light and a dark palette), `icons/`, `types/` and illustrations. The release zip ships a `cream-cat` pack under `themes\`; drop another folder into the same directory to add one. Pick a theme in the version popover and the app restarts into it; the system / light / dark setting is independent and keeps working.
+
