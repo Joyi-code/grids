@@ -25,10 +25,31 @@ static FILES: &[(&str, &[u8])] = icons![
 /// The app icon, drawn beside "Grids" in the sidebar (48px, shown at 20).
 static BRAND: (&str, &[u8]) = ("icon/grids-48.png", include_bytes!("../assets/icon/grids-48.png"));
 
-pub struct Assets;
+pub struct Assets {
+    /// A theme folder: its `icons/*.svg` and app icon win over the bundled ones.
+    theme: Option<std::path::PathBuf>,
+}
+
+impl Assets {
+    pub fn new(theme: Option<std::path::PathBuf>) -> Self { Self { theme } }
+
+    /// A file from the theme folder, if it has one under that name.
+    fn themed(&self, path: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
+        let dir = self.theme.as_ref()?;
+        if path == "icon/grids-48.png" {
+            for p in [dir.join("app-sizes").join("app-48.png"), dir.join("app.png")] {
+                if let Ok(bytes) = std::fs::read(&p) { return Some(std::borrow::Cow::Owned(bytes)) }
+            }
+            return None
+        }
+        let name = path.strip_prefix("icons/")?;
+        std::fs::read(dir.join("icons").join(name)).ok().map(std::borrow::Cow::Owned)
+    }
+}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(file) = self.themed(path) { return Ok(Some(file)) }
         if path == BRAND.0 { return Ok(Some(Cow::Borrowed(BRAND.1))) }
         Ok(FILES.iter().find(|(p, _)| *p == path).map(|(_, b)| Cow::Borrowed(*b)))
     }

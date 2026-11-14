@@ -164,3 +164,7 @@ Grids 是 [efww/grids](https://github.com/efww/grids)（MIT）的 fork，上游�
 ## 许可
 
 [MIT](LICENSE)
+
+## 主题包
+
+主题是一个文件夹，里面放 `theme.json`（浅色与深色两套色板）以及 `icons/`、`app.png`。在 `grids-gpui.json` 里写 `"theme": "D:\\themes\\cream-cat"`，或在启动前设置环境变量 `GRIDS_THEME`，程序就会用这套配色、图标和侧栏标识；缺失的颜色或图标沿用内置的。版本弹层会显示当前主题名。主题在启动时读取，换主题后重启生效。

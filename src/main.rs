@@ -29,7 +29,15 @@ fn main() {
     let (w, h) = config.window.unwrap_or((1360., 860.));
     // The product name the interface and the taskbar show, in its language.
     let brand = if config.lang == Lang::En { "PaneBoard" } else { "文件看板" };
-    Application::new().with_assets(assets::Assets).run(move |cx: &mut App| {
+    // A theme pack: GRIDS_THEME wins over the settings file.
+    let theme_dir = std::env::var_os("GRIDS_THEME").map(std::path::PathBuf::from).or_else(|| config.theme.clone());
+    if let Some(dir) = &theme_dir {
+        match grids_core::theme_pack::load(dir) {
+            Ok(pack) => theme::set_pack(pack),
+            Err(e) => log::warn!("theme: {e}"),
+        }
+    }
+    Application::new().with_assets(assets::Assets::new(theme_dir)).run(move |cx: &mut App| {
         input::bind_keys(cx);
         pane::bind_keys(cx);
         menu::bind_keys(cx);
@@ -141,3 +149,4 @@ fn install_crash_log() {
 fn crash_log_path() -> Option<std::path::PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("grids-crash.log"))
 }
+
