@@ -76,7 +76,8 @@ newest installed SDK, as CI does.
   folders, system icons, a file-operation round trip). `src/` has no tests by
   design; move testable behaviour down a layer instead.
 - README.md is the user-facing feature list. When behaviour, a shortcut or a
-  setting changes, update README.md (and keep README.ko.md in step).
+  setting changes, update README.md (and keep README.zh.md and README.ko.md in
+  step; the language link at the top of each file switches between them).
 
 ## Running it while you work
 

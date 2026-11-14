@@ -1,5 +1,7 @@
 # Grids
 
+**English** | [简体中文](README.zh.md) | [한국어](README.ko.md)
+
 A multi-pane file manager for Windows, drawn entirely by the app: up to 16 panes in one window, layouts you shape by dragging, and a few things Explorer does not do. A Today view, live change highlights, read-only folders that cannot be dragged out, linked panes that compare two folder trees, and a shelf for carrying files between panes.
 
 This repository is a fork and a rewrite. Grids began as [efww/grids](https://github.com/efww/grids), a Q-Dir style manager whose panes were embedded Windows Explorer views. Here the window, the file lists and every menu and dialog are drawn by the app itself with [GPUI](https://www.gpui.rs), the Rust UI framework behind Zed. No Explorer view is embedded anywhere, and the program is a single exe of about 5.5 MB that never touches the network.
@@ -7,8 +9,6 @@ This repository is a fork and a rewrite. Grids began as [efww/grids](https://git
 ![Grids with four panes and the sidebar](docs/screenshots/overview.png)
 
 The screenshots in this README show a mock project tree, not a real desktop.
-
-[한국어](README.ko.md)
 
 ## Panes and layouts
 
