@@ -1,143 +1,151 @@
 # Grids
 
-A fast, lightweight multi-pane file manager for Windows. Up to 16 Explorer panes in one window, a folder tree on the left, and layouts you change with one drag. One small exe (about 1 MB), nothing to install.
+**English** | [简体中文](README.zh.md)
 
-[한국어](README.ko.md)
+A multi-pane file manager for Windows, drawn entirely by the app: up to 16 panes in one window, layouts you shape by dragging, and a few things Explorer does not do. A Today view, live change highlights, read-only folders that cannot be dragged out, linked panes that compare two folder trees, and a shelf for carrying files between panes.
 
-> **GPUI rewrite (branch `gpui-rewrite`, work in progress).** Grids is being rebuilt in Rust with [GPUI](https://www.gpui.rs): every part of the window, file lists included, is drawn by the app instead of embedding Explorer views. Layout presets 1–16 or any rows × columns up to 4 × 4, draggable splitters, per-pane history, breadcrumb address bar, sortable and resizable columns, name filter, Explorer-style selection and keys, native right-click menus, drag between panes, sessions saved to `grids-gpui.json` next to the exe, light and dark themes; Simplified Chinese by default (`GRIDS_LANG=en` for English). Build with `build.cmd` (or `cargo build --release --locked`); the code is a Cargo workspace (`crates/core` for logic, `crates/shell` for the Windows Shell layer, the GPUI app in `src/`). Credits in [THIRD_PARTY.md](THIRD_PARTY.md). The rest of this README describes the current release (0.7.x).
+This repository is a fork and a rewrite. Grids began as [efww/grids](https://github.com/efww/grids), a Q-Dir style manager whose panes were embedded Windows Explorer views. Here the window, the file lists and every menu and dialog are drawn by the app itself with [GPUI](https://www.gpui.rs), the Rust UI framework behind Zed. No Explorer view is embedded anywhere, and the program is a single exe of about 5.5 MB that never touches the network.
 
-[![Grids in motion](docs/demo.gif)](docs/demo.mp4)
+![Grids with four panes and the sidebar](docs/screenshots/overview.png)
 
-▶ [Watch the full launch video with sound](docs/demo.mp4) (35 s)
+The screenshots in this README show a mock project tree, not a real desktop.
 
-![Grids, light theme](docs/screenshot-light.png)
+## Panes and layouts
 
-Every pane is a real Windows Explorer view, so right-click menus, drag and drop, thumbnails, rename and copy progress all work exactly as they do in Explorer.
+- 1 to 16 panes: up to 4 columns, each with 1 to 4 panes. The layout button offers 13 presets, and the bars under **By column** set how many panes each column holds; press and drag across them to change several columns at once.
+- Drag any divider to resize, double-click it to even the panes out.
+- Maximize the active pane with Ctrl+Shift+M or a double-click on its header.
+- Each pane keeps its own folder, history, sort, column widths and view; swapping two panes takes all of it along (Ctrl+Alt+Shift+arrows).
+- The sidebar holds Today, quick access, favourites, the drives, and saved sessions.
 
-## Features
+## Inside a pane
 
-- **Free layouts**: up to 4 columns, each with its own number of panes (1 to 4). Click the layout button for an even grid, or press and drag across it to set each column; six presets for common setups. Adding or removing cells keeps every remaining pane in its place, and a pane whose cell comes back returns there.
-- **Resizable everything**: drag any boundary between panes or the sidebar (hovering one marks it with a line in the selection colour); double-click a boundary to even it out.
-- **Folder tree** that follows the active pane and keeps the current folder's name in view, even in deep folders.
-- **Per-pane toolbar**: address bar (led by the folder's icon, as in Explorer), back / forward / up, name filter (`*.pdf;*.txt` or any part of a name; click its icon or press Alt+↓ in it to pick a file type: pictures, videos, music, documents, archives, programs, or the selected file's type; an empty filter shows "Filter names  Ctrl+F"), open the selected folder in another pane (its columns come along, so you can set one pane up and copy it around) or copy / move the selected files to another pane's folder (up to 10,000), swap places with another pane (nothing is reopened: folder, history, selection, filter and columns move along; the save button's dot shows the new arrangement until you save or swap back), favourite toggle; drag a folder onto a pane's top bar to open it there. Screen readers name the fields by pane ("Pane 2 address", "Pane 2 name filter").
-- **Sessions**: the layout, folders and each pane's columns (order, widths, sort) are saved automatically. Save named sessions and load them from cards that preview each layout; hover a card for a ✕ that deletes it, or right-click it to rename it in place (a name that's taken is refused, never overwritten); a green dot on the save button shows unsaved layout changes.
-- **Missing folders**: a local folder from a session, favourite, recent list or the command line that was deleted or renamed opens its nearest existing parent instead, and the status line says which folder was missing (8 s); it also leaves the recent list.
-- **Columns are a pane setting**: their order, widths and sort stay as the pane moves from folder to folder, and any column can be made narrower than Explorer allows (Size stops at 90 px there).
-- **Quick preview (F3 or Space)**: laid out like the app itself — a header with the file's icon, name and facts (type, dimensions, pages or lines, size, date), the content on a white plate, ‹ › at the sides and × to close. Pictures and video stills, PDF pages (Windows' own PDF engine, no reader toolbars), HWP / HWPX pages drawn by [rhwp](https://github.com/edwardkim/rhwp) without Hancom Office (up to 50 pages, one at a time, so moving on never waits for a whole document), text and source code (line numbers), Markdown (headings, lists, code), CSV / TSV as a table, ZIP and folder contents, and Office, HTML, Outlook mail and fonts through the preview handlers Explorer uses (UTF-8 HTML pages without a charset no longer come out garbled). Without a handler, Word / Excel / PowerPoint / OpenDocument files show their text or first sheet, HWP / HWPX their built-in preview, .eml mail its headers and body. Files Grids can't show get a card: big icon, type, size, dates, and program version, shortcut target or URL. Documents over 10 MB are skipped so nothing hangs, and Esc closes at once even while a preview is opening.
-- **Tabs** (View menu → Tabs in panes, off by default): each pane gets a tab strip under its header. Ctrl+T or + opens the current folder in a new tab, Ctrl+W, × or a middle click closes one, Ctrl+PgDn / Ctrl+PgUp or a click switches; double-click the empty strip for a new tab. Ctrl+K or right-click → Duplicate tab copies a tab next to it. Tabs are saved with the panes and sessions, and kept while the strips are hidden.
-- **Folder favourites**: star a folder from its pane header, jump to it from the star list in the toolbar.
-- **Drive buttons**: C: D: E: … in the top toolbar open that drive in the active pane; the active pane's drive is underlined in the selection colour, and buttons come and go as drives are plugged in or removed.
-- **Folder sizes**: the status line also shows the total size of selected folders, summed in the background (F5 sums again; "partial" when some items couldn't be read).
-- **View menu**: show hidden files and file name extensions — the same switches as Explorer's View > Show.
-- **Light and dark themes** with six selection colours each; the active pane is outlined and its header tinted. Can follow Windows' light/dark setting (View menu, on for a new install; the theme button turns it off); switching keeps each pane's history, filter and selection (on PCs with Windows 11's newer file list, the panes reopen their folders instead).
-- **Pane colour labels**: right-click a pane header to give the pane one of those colours, shown as a thin strip along its top and behind its number, and next to its name in the ⇄ menu; saved with the session.
-- **Keyboard focus comes back**: after Alt+Tab, the taskbar, a closed popup or restoring from minimized, the keys go straight to the list, address bar, filter or tree you left, with the text and caret you left in it.
-- **Single instance**: running `grids.exe C:\a D:\b` or opening a `.grids` session file reuses the open window.
-- **Portable**: settings live in `grids.ini` next to the exe, named sessions in the `sessions` folder beside it. Changes are saved automatically as you make them, so after a Windows restart, sign-out or crash Grids reopens the last state it managed to save.
-- **English or Korean** (View menu). The Explorer parts inside each pane, such as column names and right-click menus, follow your Windows display language.
-- **Batch rename (Ctrl+Shift+R)**: rename the selected items, or every file in the folder, with a stack of rules (replace with optional regex, insert, remove, numbering, date, case, trim spaces). A live preview marks invalid names, duplicates and existing files. The rename is all or nothing, safe for swaps, and can be undone. Rule sets can be saved as presets in grids.ini.
-- **More in the quick preview**: Del / Shift+Del sends the file shown to the Recycle Bin / deletes it (Windows asks as in Explorer) and moves on to the next; F2 renames it in place; Ctrl+wheel or Ctrl+= / - / 0 zooms pictures and PDF pages (drag or scrollbars to move around).
-- **Small shell helpers**: Shift+F7 makes a new text file ready to rename; the ⇄ menu tells which program is using the selected files (switch to it or ask it to close) and, with [WinMerge](https://winmerge.org) installed, compares 2 selected items or this folder with another pane's.
-- **Jump from file dialogs**: in another app's Open/Save dialog press Ctrl+Alt+G to pick one of Grids' open folders; the dialog goes there and keeps the file name you typed (View menu, on by default; the key is only taken while such a dialog is in front).
-- **Everything search** (Ctrl+Shift+F or the orange magnifier, shown while [Everything](https://www.voidtools.com) runs): results as you type in a table of name, path, size and date modified (click a column title to sort, again to reverse; size and date start biggest / newest first, and the choice is kept; drag a column border to resize, double-click it for the default widths; pointing at a result shows its whole name, folder, size and date at once), Enter shows the item selected in the active pane, Ctrl+Enter opens a folder, Alt+O searches only under the current folder.
-- **Updates**: when a newer release is out, a blue Update button appears at the top right; one click downloads it from GitHub, checks its SHA-256 and restarts Grids into it with your folders and settings. View > Check for updates turns this (and all network use) off.
-- **Star on GitHub**: View > ★ Star Grids on GitHub stars the project right away if the GitHub CLI (`gh`) is signed in; otherwise it opens the GitHub page.
+- Breadcrumb path: click a folder to go there, click `›` for the folders inside, or press Ctrl+L / Alt+D and type a path, `..`, a subfolder name, or a command such as `cmd`.
+- Back, forward, up, a name filter (Ctrl+F), five view modes (Ctrl+Shift+1 to 5), sortable and resizable columns.
+- Hidden files (Ctrl+H), a star that files the folder under favourites, and a note line under the title.
+- Selection as in Explorer: click, Ctrl+click, Shift+click, Ctrl+A, and a rubber-band box dragged from empty space.
+- The context menu opens files and folders, opens a folder in the next pane, cuts, copies, pastes into a folder, renames, deletes, makes a ZIP, adds a note or a favourite, adds to the shelf, shows the item in Explorer, asks which program is using it, and shows properties.
 
-| Layout picker | Sessions | Favourites |
-| --- | --- | --- |
-| ![Layout picker](docs/layout-picker.png) | ![Sessions](docs/sessions.png) | ![Favourites](docs/favourites.png) |
+## Sessions
 
-![Grids, dark theme](docs/screenshot-dark.png)
+Settings are written as you change them, so the app reopens where you left it. Save a named session from the sidebar and it appears in the Sessions list with its pane count; one click brings the layout and every pane's folder back.
 
-## Download
+## Watching folders
 
-Get `grids.exe` from [Releases](https://github.com/efww/grids/releases), put it in any folder and run it.
+Each pane watches its own folder and reloads when something changes on disk.
 
-The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
+![New files highlighted, with a +2 counter](docs/screenshots/live-changes.png)
 
-**Requirements**: Windows 10 (1903 or later) or Windows 11, x64. Nothing else needs installing: the C runtime is built into `grids.exe` (no Visual C++ Redistributable), and the only other DLLs it loads ship with Windows, including `icuuc.dll` (Windows' own ICU, used by GPUI), which is why 1903 is the minimum.
+- A new or modified file gets an accent wash for four seconds: full strength for two, then fading away.
+- A counter next to the pane title adds the changes up (`+1`, `+2`, …) and stays until you touch the pane: click it, use the keys, press F5, or open another folder.
+- The pane that changed while you were elsewhere keeps its own total, so a wall of 16 panes shows at a glance which ones moved.
 
-## Keyboard shortcuts
+## Read-only folders
+
+Lock a folder from the button in the pane header. The pane is then covered by a veil: nothing can be selected, opened, dragged out, dropped in, renamed or deleted, by mouse or keyboard. Only the pane's own lock button unlocks it again.
+
+![A locked pane](docs/screenshots/read-only.png)
+
+This is protection inside Grids, not an NTFS permission: other programs can still write to the folder.
+
+## Linked panes and compare
+
+Two panes can be linked, so entering a subfolder in one takes the other to the same place relative to its own base folder (up to 4 groups).
+
+Link exactly two panes and turn compare on to see the differences between the two folders: green for a name that exists only on this side, amber for the same name with another size or date.
+
+![Two linked panes comparing a shared folder and its backup](docs/screenshots/compare.png)
+
+## The shelf
+
+Drag files onto the shelf, or add the selection with Ctrl+Shift+A, then copy or move them into whichever pane is active. The shelf carries them across folders and panes.
+
+## Today
+
+Shows what changed below the panes' folders in the last day, 3 days or 7 days, newest first, with the folder each file came from.
+
+![The Today view](docs/screenshots/today.png)
+
+Enter opens a file, Ctrl+Enter shows it in its pane, Ctrl+C copies, Ctrl+Shift+A puts it on the shelf, Delete sends it to the Recycle Bin. The view rescans itself when a watched folder changes.
+
+## History and undo
+
+Every file operation Grids performs is recorded in `grids-journal.jsonl`. Ctrl+Z undoes the newest one, and the History panel lists the last 500 operations with what they touched and when.
+
+## Command palette
+
+Ctrl+K opens a palette of commands, open folders and saved sessions.
+
+![The command palette](docs/screenshots/command-palette.png)
+
+Enter runs a command or opens a folder, Ctrl+Enter opens a folder in the next pane.
+
+## Look and language
+
+- Light, dark, or follow Windows.
+- Simplified Chinese by default; `GRIDS_LANG=en` starts in English.
+
+![Dark theme](docs/screenshots/dark.png)
+
+## Keyboard
 
 | Keys | Action |
 | --- | --- |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous pane |
-| Ctrl+1 … Ctrl+9 | Go to pane 1–9 (the number at the left of each pane header; hidden in very narrow panes) |
-| Alt+Shift+← / → / ↑ / ↓ | Pane to the left / right / above / below |
-| Ctrl+Alt+Shift+← / → / ↑ / ↓ | Swap the active pane with the one to the left / right / above / below (its folder, history, selection, filter and columns stay; also in the ⇄ menu) |
-| Alt+← / Alt+→ | Back / forward |
-| Alt+↑ | Parent folder |
-| Alt+↓ | Recent folders (all panes, newest first; right-click ← / → too) |
-| Ctrl+L, Alt+D, F4 | Address bar: also `..` or a subfolder name, a file to open, or a command such as `cmd`, `wt`, `powershell` (runs in this pane's folder), or part of a recent or favourite folder's name |
+| Ctrl+1 … Ctrl+9 | Go to that pane |
+| Ctrl+Alt+Shift+← / → / ↑ / ↓ | Swap the active pane with its neighbour |
+| Ctrl+Shift+M | Maximize / restore the active pane |
+| Ctrl+Shift+G | Layout picker |
+| Ctrl+B | Show / hide the sidebar |
+| Alt+← / Alt+→ / Alt+↑ | Back / forward / up |
+| Ctrl+L, Alt+D | Address bar (a path, `..`, or a command) |
 | Ctrl+F | Name filter |
-| Alt+↓ (in the filter) | File types menu (or click the filter's icon) |
-| F6 / Shift+F6 | Move between file list, address bar, filter and folder tree |
-| Enter / Esc | Apply / cancel the address or filter |
-| Win+Alt+E | Bring Grids to front from any app, ready to type in the active pane (again: minimize; View menu turns it off) |
 | Ctrl+H | Show hidden files |
-| F3 / Space | Quick preview of the focused file: pictures, text and code, Markdown, CSV tables, Office / PDF / HTML / mail (files up to 10 MB), HWP / HWPX, ZIP contents, folders; anything else as a card of facts (arrows or the wheel: previous / next file without closing; on long text the wheel scrolls first and moves on past the end; PgUp / PgDn: scroll; Esc: close, also while it is still opening) |
-| F7 | New folder (named and ready to rename, as Explorer's Ctrl+Shift+N) |
-| Ctrl+T / Ctrl+W | New tab / close tab, with tabs on |
-| Ctrl+K | Duplicate the current tab (also on a tab's right-click menu) |
-| Ctrl+PgDn / Ctrl+PgUp | Next / previous tab |
-| Ctrl+V | With a copied picture (screenshot, browser image): save it here as a PNG file |
-| Ctrl+S | Save the current session |
-| Ctrl+B | Favourites list (↑/↓, Enter to open, Del to remove, Alt+↑/↓ or drag to reorder) |
-| Ctrl+/ | Keyboard shortcuts (this list) |
-| Ctrl+Shift+M | Maximize / restore the active pane (or double-click its header) |
-| Ctrl+Shift+E | Hide / show the folder tree (also View menu → Folder tree; its width is kept) |
-| Ctrl+Shift+O | Open the folders of open Explorer windows and tabs in panes, from the active pane on (also View menu; panes already showing one of them stay put) |
-| Ctrl+Shift+C | Copy the full path of the selected items (or of the current folder) |
-| Num+ / Ctrl+Shift+A | Select files by pattern (`*.jpg;*.png` or part of a name; Shift+Enter deselects) |
-| Num− | Deselect files by pattern |
-| Num* | Invert the selection |
-| Ctrl+Shift+R | Batch rename (in the window: Ctrl+Enter rename, Esc close; rule list: Space on/off, Ins add, Del remove, Alt+↑/↓ move) |
-| Shift+F7 | New text file |
-| Ctrl+Shift+F | Search with Everything (↑/↓, Enter: show in the active pane, Ctrl+Enter: open a folder, Alt+O: only under this folder) |
-| Ctrl+Alt+G | In another app's Open / Save dialog: jump to a folder open in Grids |
-| Del / Shift+Del (preview) | Recycle / delete the file shown, go to the next |
-| F2 (preview) | Rename the file shown |
-| Ctrl+wheel, Ctrl+= / Ctrl+- / Ctrl+0 (preview) | Zoom in / out / fit |
-| F2, Del, Ctrl+C / X / V, F5 | Same as Explorer (on F5 the pane's ↑ turns into a spinning ↻ for a moment) |
+| Ctrl+A | Select all |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
+| Ctrl+Shift+C | Copy the full path |
+| Ctrl+Shift+A | Add the selection to the shelf |
+| F2 / Delete / Shift+Delete | Rename / Recycle Bin / delete for good |
+| F5 | Reload the folder |
+| F7, Ctrl+Shift+N | New folder |
+| Alt+Enter | Properties |
+| Shift+F10, Menu key | Context menu |
+| Ctrl+Shift+1 … 5 | View modes: huge, large, medium, list, details |
+| Ctrl+K | Command palette |
+| Ctrl+Z | Undo the last operation |
+| Ctrl+↑ / Ctrl+↓ | Move the cursor without changing the selection |
 
-Double-clicking empty space in a pane goes up a folder (can be turned off in the view menu).
+## Running it
 
-Address bar: click a folder in the path to go there; click a › to list the folders inside; click the current folder or empty space, or press Ctrl+L, to type a path.
-
-## Known issues
-
-**Don't run Grids as administrator.** A user reported that PowerToys Mouse Crosshairs (and similar tools) stopped following the cursor and froze where they clicked over Grids. It happens only when Grids runs as administrator: Windows doesn't let a program without administrator rights receive mouse input over a window that has them (UIPI), so a normal PowerToys gets no mouse movement over an elevated Grids. Give both the same rights, either way:
-
-1. **Recommended**: run Grids normally. Don't open `grids.exe` with right-click → **Run as administrator**, and in the shortcut's or `grids.exe`'s **Properties → Compatibility**, clear **Run this program as an administrator**.
-2. If you need Grids as administrator, run PowerToys as administrator too: **PowerToys Settings → General → Always run as administrator**, then restart PowerToys.
-
-## Build
-
-Needs the Rust toolchain from [rustup](https://rustup.rs) (`rust-toolchain.toml` pins the compiler) and the Windows SDK: GPUI compiles its HLSL shaders with the SDK's `fxc.exe`. Installing Visual Studio's **Desktop development with C++** workload gets both the MSVC linker and the SDK. MSYS2 and MinGW are not used. (The 0.7.x release on `main` predates this rewrite and was built with the GNU toolchain.)
+Build it with the Rust toolchain from [rustup](https://rustup.rs) (the version is pinned in `rust-toolchain.toml`) and the Windows SDK; GPUI compiles its shaders with the SDK's `fxc.exe`.
 
 ```
 build.cmd
 ```
 
-It runs `cargo build --release --locked`, copies `target\release\grids.exe` to `grids.exe` in the project folder and prints its size. It also points `GPUI_FXC_PATH` at the newest installed SDK (as CI does), so GPUI's build script does not have to know the one SDK version it was written against. The result is the same as running cargo by hand:
+or
 
 ```
 cargo build --release --locked
 ```
 
-Tests: `cargo test --release --locked --workspace` (they live in `crates/core` and `crates/shell`; the Windows Shell tests drive real Explorer operations). The release profile is size-first, and CI fails the build when `grids.exe` grows past 8,000,000 bytes.
+`build.cmd` also points `GPUI_FXC_PATH` at the newest installed SDK, as CI does. Tests: `cargo test --release --locked --workspace`.
 
-The app icon (`assets/icon/`: `grids.ico` with 16–256 px, PNGs up to 1024 px) was generated with AI for this project; `build.rs` embeds it in `grids.exe` as icon resource 1.
+The result is a single `grids.exe`; put it in any folder and run it. There is no prebuilt download for this version yet, so build it as above. Settings (`grids-gpui.json`) and the operation journal (`grids-journal.jsonl`) are written next to the exe, so the folder has to be writable. `GRIDS_CONFIG=<path>` puts the settings somewhere else, and `GRIDS_LOG=info` logs warnings to stderr.
+
+Windows 10 (1903 or later) or Windows 11, x64. The C runtime is linked statically, so a clean Windows starts it without the Visual C++ Redistributable.
+
+## Limits
+
+- Read-only folders are enforced inside Grids only.
+- Compare looks at names, sizes and dates, and at folders by existence; it does not recurse.
+- Today scans three levels below each pane's folder, up to 20,000 files.
+- Undo covers the operations Grids recorded; changes made in other programs are not recorded.
+- The app has no network code at all: no updates check, no telemetry.
 
 ## Credits
 
-Inspired by [Q-Dir](https://www.softwareok.com/?seite=Freeware/Q-Dir). Grids is an independent project, not affiliated with Q-Dir or its author.
-
-Thanks to Jun ([@Samek86](https://github.com/Samek86)): the fix for F3, Space and F7 doing nothing in the file list on some PCs and the screen-reader pane names after a layout change come from Jun's fork, [Samek86/grids](https://github.com/Samek86/grids).
-
-Batch rename, the preview's Del / F2 / zoom, Shift+F7 new text file, "which program is using this?", WinMerge compare, the file dialog jump, Everything search and the in-app update were ported from Jun's fork [Samek86/maguro](https://github.com/Samek86/maguro) (MIT) and re-implemented for Grids, with Jun credited as co-author on those commits.
-
-HWP / HWPX pages in the preview are laid out and drawn by [rhwp](https://github.com/edwardkim/rhwp) by Edward Kim (MIT License, Copyright (c) 2025-2026 Edward Kim).
+Grids is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which was inspired by [Q-Dir](https://www.softwareok.com/?seite=Freeware/Q-Dir). The rewrite is built on [GPUI](https://www.gpui.rs). Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## License
 
