@@ -1,0 +1,31 @@
+{
+  "name": "擎天柱 · 钢铁领袖",
+  "author": "Perplexity / user-supplied generated portrait",
+  "version": "1.0.0",
+  "light": {
+    "background": "#E9EEF5",
+    "surface": "#F8FAFE",
+    "text": "#192C46",
+    "text_caption": "#4E6078",
+    "line": "#233F6226",
+    "accent": "#1F55A1",
+    "selection": "#D3E1F2",
+    "hover": "#E0E9F4",
+    "added": "#286C50",
+    "changed": "#8B531B",
+    "danger": "#AE3345"
+  },
+  "dark": {
+    "background": "#101826",
+    "surface": "#1B293D",
+    "text": "#EDF4FD",
+    "text_caption": "#B0C2DC",
+    "line": "#D3E5FF26",
+    "accent": "#70BFFF",
+    "selection": "#2D4564",
+    "hover": "#25364F",
+    "added": "#8ED6AF",
+    "changed": "#F0BC78",
+    "danger": "#FF9BA8"
+  }
+}
