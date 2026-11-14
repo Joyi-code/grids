@@ -1,0 +1,31 @@
+{
+  "name": "奶油猫咪工作室 · 生图版",
+  "author": "Perplexity / 用户提供的生图母图",
+  "version": "2.0.0",
+  "light": {
+    "background": "#F7F1E7",
+    "surface": "#FFFCF6",
+    "text": "#44352D",
+    "text_caption": "#6E5B4D",
+    "line": "#44352D24",
+    "accent": "#A34F26",
+    "selection": "#EEDBC5",
+    "hover": "#F3E6D6",
+    "added": "#3F704E",
+    "changed": "#885F19",
+    "danger": "#B33E39"
+  },
+  "dark": {
+    "background": "#241F1C",
+    "surface": "#302823",
+    "text": "#F8EEDD",
+    "text_caption": "#C8B5A3",
+    "line": "#F8EEDD26",
+    "accent": "#F1AD7F",
+    "selection": "#554132",
+    "hover": "#40342B",
+    "added": "#A0C69D",
+    "changed": "#E5C078",
+    "danger": "#F19890"
+  }
+}
