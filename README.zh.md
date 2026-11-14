@@ -6,6 +6,8 @@ Windows 多窗格文件管理器，界面全部由程序自己绘制：一个窗
 
 本仓库是 fork 之后的重写。Grids 起源于 [efww/grids](https://github.com/efww/grids)，那是一个把资源管理器视图嵌进窗格的 Q-Dir 风格管理器。这里的窗口、文件列表、菜单与对话框全部用 [GPUI](https://www.gpui.rs)（Zed 的 Rust UI 框架）自绘，不嵌入任何资源管理器视图；整个程序是一个约 5.5 MB 的 exe，不联网。
 
+界面里的名字是 **文件看板**（中文）和 **PaneBoard**（英文）。仓库名、可执行文件 `grids.exe` 和配置文件名仍沿用 Grids。
+
 ![四个窗格与侧栏](docs/screenshots/overview.png)
 
 本文截图使用演示用的模拟目录，不是真实桌面。
@@ -115,6 +117,14 @@ Enter 执行命令或打开目录，Ctrl+Enter 在下一格打开该目录。
 | Ctrl+Z | 撤销上一步操作 |
 | Ctrl+↑ / Ctrl+↓ | 只移动光标，不改选择 |
 
+## 下载
+
+在 [Releases](https://github.com/Joyi-code/grids/releases/latest) 下载 `grids.exe`，放到任意目录运行即可，不需要安装，C 运行库已静态链接。
+
+程序未做代码签名，首次运行 Windows SmartScreen 可能提示：点「更多信息」→「仍要运行」。
+
+Windows 10（1903 及以上）或 Windows 11，x64。
+
 ## 运行
 
 需要 [rustup](https://rustup.rs) 安装的 Rust 工具链（版本固定在 `rust-toolchain.toml`）和 Windows SDK；GPUI 用 SDK 的 `fxc.exe` 编译着色器。
@@ -131,9 +141,7 @@ cargo build --release --locked
 
 `build.cmd` 会像 CI 一样把 `GPUI_FXC_PATH` 指向最新安装的 SDK。测试：`cargo test --release --locked --workspace`。
 
-产物是单个 `grids.exe`，放到任意目录即可运行。当前版本还没有预编译下载，需要按上面的步骤自行构建。配置（`grids-gpui.json`）和操作日志（`grids-journal.jsonl`）写在 exe 同目录，所以该目录必须可写。`GRIDS_CONFIG=<路径>` 可改配置位置，`GRIDS_LOG=info` 把警告输出到 stderr。
-
-Windows 10（1903 及以上）或 Windows 11，x64。C 运行库静态链接，干净的 Windows 也不必装 Visual C++ 运行库。
+产物是单个 `grids.exe`，放到任意目录即可运行。配置（`grids-gpui.json`）和操作日志（`grids-journal.jsonl`）写在 exe 同目录，所以该目录必须可写。`GRIDS_CONFIG=<路径>` 可改配置位置，`GRIDS_LOG=info` 把警告输出到 stderr。
 
 ## 限制
 

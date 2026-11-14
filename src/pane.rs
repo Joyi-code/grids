@@ -1573,10 +1573,11 @@ impl PaneView {
         });
         // Read-only: the lock stays in view; unlocked it shows on hover.
         let lock_root = state::locked_root(cx, &st.path);
+        let brand = state::brand(cx);
         let lock_tip: SharedString = match &lock_root {
-            Some(r) if r == &st.path => t("只读文件夹（仅在 Grids 内生效）· 点击解锁", "Read-only (inside Grids only) · click to unlock").into(),
+            Some(r) if r == &st.path => if en { format!("Read-only folder (inside {brand} only) · click to unlock") } else { format!("只读文件夹（仅在{brand}内生效）· 点击解锁") }.into(),
             Some(r) => if en { format!("Read-only: locked at “{}” · click to unlock", r.display()) } else { format!("只读：由「{}」锁定 · 点击解锁", r.display()) }.into(),
-            None => t("设为只读（仅在 Grids 内生效）", "Make read-only (inside Grids only)").into(),
+            None => if en { format!("Make read-only (inside {brand} only)") } else { format!("设为只读（仅在{brand}内生效）") }.into(),
         };
         let locked = lock_root.is_some();
         let lock_btn = div().id("lock").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
@@ -1944,9 +1945,10 @@ impl Render for PaneView {
         });
         // A locked folder takes no clicks at all: nothing to select, nothing to
         // drag, nothing to drop onto.
+        let brand = state::brand(cx);
         let lock_veil = locked.as_ref().map(|root| {
             let tip: SharedString = if root == &self.state.path {
-                if en { "Locked folder (inside Grids only) · unlock with the lock button in the title bar".into() } else { "文件夹已锁定（仅在 Grids 内生效）· 点标题栏的锁图标解锁".into() }
+                if en { format!("Locked folder (inside {brand} only) · unlock with the lock button in the title bar").into() } else { format!("文件夹已锁定（仅在{brand}内生效）· 点标题栏的锁图标解锁").into() }
             } else if en { format!("Locked at “{}” · unlock with the lock button in the title bar", root.display()).into() } else { format!("由「{}」锁定 · 点标题栏的锁图标解锁", root.display()).into() };
             let root2 = root.clone();
             div().id("lock-veil").absolute().inset_0().occlude()

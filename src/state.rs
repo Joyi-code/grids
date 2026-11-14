@@ -33,6 +33,8 @@ impl Shared {
 pub fn shared(cx: &App) -> &Shared { cx.global::<Shared>() }
 pub fn lang(cx: &App) -> Lang { cx.global::<Shared>().config.lang }
 pub fn en(cx: &App) -> bool { lang(cx) == Lang::En }
+/// The name the interface shows for the app.
+pub fn brand(cx: &App) -> &'static str { if en(cx) { "PaneBoard" } else { "文件看板" } }
 /// The read-only folder covering `path` (itself or an ancestor), if any.
 pub fn locked_root(cx: &App, path: &Path) -> Option<PathBuf> {
     grids_core::locked::locked_root(&shared(cx).config.locked, path).cloned()
