@@ -1,172 +1,207 @@
-# Grids
+# PaneBoard
 
 **English** | [简体中文](README.md)
 
-A multi-pane file manager for Windows, drawn entirely by the app: up to 16 panes in one window, layouts you shape by dragging, and a few things Explorer does not do. A Today view, live change highlights, read-only folders that cannot be dragged out, linked panes that compare two folder trees, and a shelf for carrying files between panes.
+A multi-pane file manager for Windows. One window holds up to sixteen panes; changes highlight as they happen, a folder can be locked read-only, two folders can be compared side by side, and files can be collected on a shelf before they are moved.
 
-This repository is a fork and a rewrite. Grids began as [efww/grids](https://github.com/efww/grids), a Q-Dir style manager whose panes were embedded Windows Explorer views. Here the window, the file lists and every menu and dialog are drawn by the app itself with [GPUI](https://www.gpui.rs), the Rust UI framework behind Zed. No Explorer view is embedded anywhere, and the program is a single exe of about 5.5 MB. It never uploads anything; the only request it can make is the version check described below.
+The whole interface is drawn by the program itself (GPUI, the Rust UI framework behind Zed); no Explorer view is embedded. The app is a single exe with the themes compiled in, written out on first run.
 
-In the window the app calls itself **文件看板** in Chinese and **PaneBoard** in English. The repository, the executable (`grids.exe`) and the settings file keep the name Grids.
+![Four panes and the sidebar](docs/screenshots/overview.png)
 
-![Grids with four panes and the sidebar](docs/screenshots/overview.png)
+Screenshots use a mock folder tree, not a real desktop.
 
-The screenshots in this README show a mock project tree, not a real desktop.
+## Why this exists
 
-## Panes and layouts
+Moving files around on Windows usually means:
 
-- 1 to 16 panes: up to 4 columns, each with 1 to 4 panes. The layout button offers 13 presets, and the bars under **By column** set how many panes each column holds; press and drag across them to change several columns at once.
-- Drag any divider to resize, double-click it to even the panes out.
-- Maximize the active pane with Ctrl+Shift+M or a double-click on its header.
-- Each pane keeps its own folder, history, sort, column widths and view; swapping two panes takes all of it along (Ctrl+Alt+Shift+arrows).
-- The sidebar holds Today, quick access, favourites, the drives, and saved sessions.
+- Explorer shows one folder at a time, so copying means switching windows until you lose track.
+- "What changed recently?" means sorting by date and visiting each folder by hand.
+- Showing an archive to someone is risky: one slip renames, deletes or drags something away.
+- Checking a backup against the original is a line-by-line stare.
+- Collecting files from several folders means copying and pasting one at a time.
 
-## Inside a pane
+PaneBoard puts those actions in one window: several panes at once, live change counts, a read-only lock, linked comparison, a shelf, plus a command palette and undo.
 
-- Breadcrumb path: click a folder to go there, click `›` for the folders inside, or press Ctrl+L / Alt+D and type a path, `..`, a subfolder name, or a command such as `cmd`.
-- Back, forward, up, a name filter (Ctrl+F), five view modes (Ctrl+Shift+1 to 5), sortable and resizable columns.
-- Hidden files (Ctrl+H), a star that files the folder under favourites, and a note line under the title.
-- Selection as in Explorer: click, Ctrl+click, Shift+click, Ctrl+A, and a rubber-band box dragged from empty space.
-- The context menu opens files and folders, opens a folder in the next pane, cuts, copies, pastes into a folder, renames, deletes, makes a ZIP, adds a note or a favourite, adds to the shelf, shows the item in Explorer, asks which program is using it, and shows properties.
+## What you get
 
-## Sessions
+- Fewer windows: four panes side by side, source on the left, target on the right, drag once.
+- Nothing missed: a pane that changed shows `+1`, `+2` beside its title until you touch it.
+- No accidents: lock a pane and the mouse and keyboard cannot select, open, drag, rename or delete.
+- Faster checks: link two panes and compare; green marks names on one side only, amber marks same name with a different size or date.
+- A way back to recent work: the Today view gathers today, three days and seven days across every pane folder.
 
-Settings are written as you change them, so the app reopens where you left it. Save a named session from the sidebar and it appears in the Sessions list with its pane count; one click brings the layout and every pane's folder back.
+## Features
 
-## Watching folders
+### Panes and layout
 
-Each pane watches its own folder and reloads when something changes on disk.
+- 1 to 16 panes: up to four columns, one to four rows each. Thirteen presets, plus a custom column picker whose bars can be dragged.
+- Drag the dividers to resize; double-click a divider to split a column evenly.
+- Every pane keeps its folder, history, sort, column widths and view; swapping two panes moves all of it.
+- The sidebar holds Today, quick access, favourites, drives and saved sessions.
 
-![New files highlighted, with a +2 counter](docs/screenshots/live-changes.png)
+### Files
 
-- A new or modified file gets an accent wash for four seconds: full strength for two, then fading away.
-- A counter next to the pane title adds the changes up (`+1`, `+2`, …) and stays until you touch the pane: click it, use the keys, press F5, or open another folder.
-- The pane that changed while you were elsewhere keeps its own total, so a wall of 16 panes shows at a glance which ones moved.
+- Breadcrumb path: click a folder to enter, click `›` for its subfolders.
+- Name filter (Ctrl+F), five views (Ctrl+Shift+1 to 5), sortable and resizable columns.
+- Hidden files (Ctrl+H), a star for favourites, and one line of notes under the title.
+- Selection works like Explorer: click, Ctrl+click, Shift+click, Ctrl+A, and a rubber band on empty space.
+- Right-click menu: open, open in the next pane, cut, copy, paste into folder, rename, delete, compress to ZIP, note, favourite, add to shelf, show in Explorer, size on disk, properties.
 
-## Read-only folders
+### Watching and change highlights
 
-Lock a folder from the button in the pane header. The pane is then covered by a veil: nothing can be selected, opened, dragged out, dropped in, renamed or deleted, by mouse or keyboard. Only the pane's own lock button unlocks it again.
+![New file highlight and the counter](docs/screenshots/live-changes.png)
+
+- New or changed files highlight for four seconds: full strength, then a fade.
+- The counter beside the title (`+1`, `+2`…) keeps adding up until you touch that pane.
+- Changes that happened while you were elsewhere still count, so sixteen panes still tell you where to look.
+
+### Read-only lock
+
+The padlock in a pane's header locks its folder. The pane is then veiled: no selecting, opening, dragging, renaming or deleting, and only that pane's padlock can lift it.
 
 ![A locked pane](docs/screenshots/read-only.png)
 
-This is protection inside Grids, not an NTFS permission: other programs can still write to the folder.
+The lock lives inside PaneBoard; it is not an NTFS permission.
 
-## Linked panes and compare
+### Linking and comparing
 
-Two panes can be linked, so entering a subfolder in one takes the other to the same place relative to its own base folder (up to 4 groups).
+Link two panes and one follows the other into the same relative subfolder, up to four pairs. With exactly two linked panes, compare marks the differences.
 
-Link exactly two panes and turn compare on to see the differences between the two folders: green for a name that exists only on this side, amber for the same name with another size or date.
+![Comparing a share with its backup](docs/screenshots/compare.png)
 
-![Two linked panes comparing a shared folder and its backup](docs/screenshots/compare.png)
+### Today
 
-## The shelf
-
-Drag files onto the shelf, or add the selection with Ctrl+Shift+A, then copy or move them into whichever pane is active. The shelf carries them across folders and panes.
-
-## Today
-
-Shows what changed below the panes' folders in the last day, 3 days or 7 days, newest first, with the folder each file came from.
+Today, three days or seven days of changes across every pane folder, newest first, each labelled with the folder it came from.
 
 ![The Today view](docs/screenshots/today.png)
 
-Enter opens a file, Ctrl+Enter shows it in its pane, Ctrl+C copies, Ctrl+Shift+A puts it on the shelf, Delete sends it to the Recycle Bin. The view rescans itself when a watched folder changes.
+Enter opens, Ctrl+Enter reveals it in its pane, Ctrl+C copies, Ctrl+Shift+A shelves it, Delete sends it to the recycle bin.
 
-## History and undo
+### Shelf
 
-Every file operation Grids performs is recorded in `grids-journal.jsonl`. Ctrl+Z undoes the newest one, and the History panel lists the last 500 operations with what they touched and when.
+Drag files onto the shelf at the bottom, or press Ctrl+Shift+A, then copy or move them into the current pane. Collecting across folders and panes is the point.
 
-## Command palette
+### Sessions
 
-Ctrl+K opens a palette of commands, open folders and saved sessions.
+Everything saves as you go. Name the current layout in the sidebar and it comes back with every pane's folder.
+
+### Command palette and the less obvious parts
+
+Ctrl+K opens the palette over commands, open folders and saved sessions.
 
 ![The command palette](docs/screenshots/command-palette.png)
 
-Enter runs a command or opens a folder, Ctrl+Enter opens a folder in the next pane.
+Enter runs a command or opens a folder, Ctrl+Enter opens it in the next pane.
 
-## Look and language
+| Feature | How |
+| --- | --- |
+| Address bar | Ctrl+L or Alt+D: a path, `..`, a subfolder name, or a command such as `cmd` |
+| Collect | Ctrl+Shift+A puts the selection on the shelf |
+| Undo | Ctrl+Z; the history panel lists the last 500 operations |
+| Maximise a pane | Ctrl+Shift+M, or double-click its title bar |
+| Move the cursor only | Ctrl+↑ / Ctrl+↓, leaving the selection alone |
+| Copy the full path | Ctrl+Shift+C |
+| Swap panes | Ctrl+Alt+Shift+arrow |
+| Hide the sidebar | Ctrl+B |
+| Explorer's own menu | Shift+F10 or the menu key |
 
-- Light, dark, or follow Windows.
-- Simplified Chinese by default; `GRIDS_LANG=en` starts in English.
+### Themes
 
-![Dark theme](docs/screenshots/dark.png)
+Two themes ship inside the exe and expand into `themes\` on first run:
+
+- **奶油猫咪 (Cream Cat)**: warm cream palette, cat illustrations and icons.
+- **变形金刚 (Transformers)**: steel blue palette, metal illustrations and icons.
+
+![Cream Cat theme](docs/screenshots/theme-cream-cat.png)
+
+![Transformers theme](docs/screenshots/theme-optimus.png)
+
+A theme is not a palette swap: colours, all 89 toolbar icons, file-type icons, empty-folder and no-results illustrations, the missing-folder illustration, the popover banner, the sidebar illustration and the window backdrop all change.
+
+Light, dark and follow-system stay independent of the theme; every pack carries both palettes. Pick one under the version label at the bottom left and the app restarts into it.
+
+Themes are open: a folder with `theme.json`, `icons/`, `types/` and a few illustrations, dropped into `themes\`. The format is in [docs/theme-assets.md](docs/theme-assets.md).
 
 ## Keyboard
 
-| Keys | Action |
+| Key | Action |
 | --- | --- |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous pane |
-| Ctrl+1 … Ctrl+9 | Go to that pane |
-| Ctrl+Alt+Shift+← / → / ↑ / ↓ | Swap the active pane with its neighbour |
-| Ctrl+Shift+M | Maximize / restore the active pane |
+| Ctrl+1 … Ctrl+9 | Jump to pane N |
+| Ctrl+Alt+Shift+arrows | Swap with the neighbouring pane |
+| Ctrl+Shift+M | Maximise / restore the pane |
 | Ctrl+Shift+G | Layout picker |
 | Ctrl+B | Show / hide the sidebar |
 | Alt+← / Alt+→ / Alt+↑ | Back / forward / up |
-| Ctrl+L, Alt+D | Address bar (a path, `..`, or a command) |
+| Ctrl+L, Alt+D | Address bar |
 | Ctrl+F | Name filter |
-| Ctrl+H | Show hidden files |
+| Ctrl+H | Hidden files |
 | Ctrl+A | Select all |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
 | Ctrl+Shift+C | Copy the full path |
-| Ctrl+Shift+A | Add the selection to the shelf |
-| F2 / Delete / Shift+Delete | Rename / Recycle Bin / delete for good |
-| F5 | Reload the folder |
+| Ctrl+Shift+A | Shelf the selection |
+| F2 / Delete / Shift+Delete | Rename / recycle / delete for good |
+| F5 | Reload |
 | F7, Ctrl+Shift+N | New folder |
 | Alt+Enter | Properties |
-| Shift+F10, Menu key | Context menu |
-| Ctrl+Shift+1 … 5 | View modes: huge, large, medium, list, details |
+| Shift+F10, menu key | Context menu |
+| Ctrl+Shift+1 … 5 | Views: extra large, large, medium, list, details |
 | Ctrl+K | Command palette |
 | Ctrl+Z | Undo the last operation |
 | Ctrl+↑ / Ctrl+↓ | Move the cursor without changing the selection |
 
 ## Download
 
-Get `grids-<version>.exe` from [Releases](https://github.com/Joyi-code/grids/releases/latest) and run it from any folder, one file. The 奶油猫咪 theme is embedded: the first run writes `themes\cream-cat\` next to the exe, and the version popover lists it with nothing to install.
+Grab `grids-<version>.exe` from [Releases](https://github.com/Joyi-code/grids/releases/latest) and run it from any folder: one file. Both themes are inside; the first run writes `themes\` beside it.
 
-Nothing else needs installing, and the C runtime is linked statically. The exe is not code-signed, so Windows SmartScreen may warn the first time: choose **More info → Run anyway**.
+Nothing to install, the C runtime is linked statically. The exe is not code-signed, so SmartScreen may warn once: More info, Run anyway. Windows 10 (1903+) or Windows 11, x64.
 
-Windows 10 (1903 or later) or Windows 11, x64.
+## Updates
 
-## Running it
+One check at startup; when a newer release exists the bottom left shows "更新到 x.y.z". One click downloads it, checks the SHA-256, swaps the exe and restarts, with a percentage while it downloads.
 
-Build it with the Rust toolchain from [rustup](https://rustup.rs) (the version is pinned in `rust-toolchain.toml`) and the Windows SDK; GPUI compiles its shaders with the SDK's `fxc.exe`.
+Only the exe is replaced: `grids-gpui.json`, `grids-journal.jsonl` and `themes\` are never deleted or rewritten, and a failed check leaves everything untouched.
+
+## Privacy
+
+The only network request is the version check: one GET to `api.github.com/repos/Joyi-code/grids/releases/latest`, no parameters, no identifiers, sent by the system `curl.exe`; the app links no network library. The switch in the version popover turns it off, and then nothing leaves the machine. No telemetry, no file names or folder contents.
+
+## Limits
+
+- The read-only lock only applies inside PaneBoard.
+- Compare looks at names, sizes and dates; folders are compared by existence, not recursively.
+- The Today view scans three levels in each pane folder, at most 20,000 files.
+- Undo covers operations PaneBoard recorded; changes made elsewhere are not tracked.
+- Folder icons come from the theme; without a `types\` folder they fall back to the system icons.
+
+## Contributing
+
+- Ideas, new themes, bug reports: open an [Issue](https://github.com/Joyi-code/grids/issues).
+- Code or theme pull requests are welcome; run `cargo test --release --locked --workspace` first.
+- Next up: more themes (craft, pixel, minimal), better drag and drop, batch rename, more file operations. Tell me what you want first.
+
+## Building from source
+
+Rust from [rustup](https://rustup.rs) (pinned in `rust-toolchain.toml`) and the Windows SDK; GPUI compiles its shaders with the SDK's `fxc.exe`.
 
 ```
 build.cmd
 ```
 
-or
+or `cargo build --release --locked`. The result is one `grids.exe`; `grids-gpui.json` and `grids-journal.jsonl` are written next to it, so that folder must be writable. `GRIDS_CONFIG=<path>` moves the config, `GRIDS_LANG=en` starts in English, `GRIDS_LOG=info` logs to stderr.
 
-```
-cargo build --release --locked
-```
+## Contact
 
-`build.cmd` also points `GPUI_FXC_PATH` at the newest installed SDK, as CI does. Tests: `cargo test --release --locked --workspace`.
+WeChat: `pixel-cafetime`
 
-The result is a single `grids.exe`; put it in any folder and run it. Settings (`grids-gpui.json`) and the operation journal (`grids-journal.jsonl`) are written next to the exe, so the folder has to be writable. `GRIDS_CONFIG=<path>` puts the settings somewhere else, and `GRIDS_LOG=info` logs warnings to stderr.
+<img src="docs/screenshots/wechat-qrcode.png" alt="WeChat QR code" width="240" height="290">
 
-## Updates
-
-Grids asks GitHub for the newest release tag once at startup. When a newer version exists, a **新版本 / New version** button appears at the bottom left of the sidebar; click it to open the release page and download the new exe.
-
-The check sends nothing about you or your files: it is one GET to `api.github.com/repos/Joyi-code/grids/releases/latest` with no arguments and no identifiers, made by the system's `curl.exe` so the app itself links no networking code. Turn it off with **Check at startup** in the version popover; nothing else in the program uses the network. The source is open, so every line of it can be read here.
-
-## Limits
-
-- Read-only folders are enforced inside Grids only.
-- Compare looks at names, sizes and dates, and at folders by existence; it does not recurse.
-- Today scans three levels below each pane's folder, up to 20,000 files.
-- Undo covers the operations Grids recorded; changes made in other programs are not recorded.
-- The only network request is the version check; it can be turned off, and no telemetry or file upload exists.
+Say what you are writing about before adding the contact.
 
 ## Credits
 
-Grids is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which was inspired by [Q-Dir](https://www.softwareok.com/?seite=Freeware/Q-Dir). The rewrite is built on [GPUI](https://www.gpui.rs). Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
+PaneBoard is a fork of [efww/grids](https://github.com/efww/grids) (MIT), which took its cue from [Q-Dir](https://www.softwareok.com/?seite=Freeware/Q-Dir). The rewrite is built on [GPUI](https://www.gpui.rs). Third-party notices are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
-## License
+## Licence
 
 [MIT](LICENSE)
-
-## Theme packs
-
-A theme is a folder with a `theme.json` (a light and a dark palette), `icons/`, `types/` and illustrations. 奶油猫咪 is compiled into the exe and written to `themes\cream-cat\` beside it on first run; drop another folder into the same directory to add one. Pick a theme in the version popover and the app restarts into it; the system / light / dark setting is independent and keeps working.
-
-
