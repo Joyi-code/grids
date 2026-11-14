@@ -124,6 +124,11 @@ pub fn open_with_system(path: &Path) -> io::Result<()> {
     imp::open_with_system(path)
 }
 
+/// Opens a URL with the system's default handler (normally the browser).
+pub fn open_url(url: &str) -> io::Result<()> {
+    imp::open_url(url)
+}
+
 /// Reads where a shortcut points without resolving it: no link tracking, no
 /// search, no UI, so it is safe on any thread and never re-enters the app.
 /// On Windows `.lnk` files (env vars expanded); `Err` when the file is not a

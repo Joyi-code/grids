@@ -17,6 +17,7 @@ pub mod pane;
 pub mod paths;
 pub mod session;
 pub mod today;
+pub mod version;
 
 pub use layout::Layout;
 pub use listing::{Entry, FileKind};
