@@ -87,6 +87,26 @@ pub fn load(dir: &Path) -> Result<ThemePack, String> {
     parse(&text)
 }
 
+/// The theme folders inside `dir`: each subfolder with a readable `theme.json`,
+/// as (name, folder), sorted by name. A pack without a name uses its folder name.
+pub fn list(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    for entry in entries.flatten() {
+        let folder = entry.path();
+        if !folder.is_dir() { continue }
+        let Ok(pack) = load(&folder) else { continue };
+        let name = if pack.name.trim().is_empty() {
+            folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            pack.name
+        };
+        out.push((name, folder));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
