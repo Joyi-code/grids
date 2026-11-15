@@ -43,6 +43,7 @@ use other as imp;
 
 mod zip;
 pub mod search;
+pub mod tray;
 pub mod window;
 
 /// A mounted drive / volume root.

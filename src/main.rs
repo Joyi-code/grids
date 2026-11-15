@@ -15,6 +15,7 @@ mod update;
 mod ui;
 mod workspace;
 
+use futures::StreamExt;
 use gpui::*;
 use grids_core::format::Lang;
 use grids_core::Config;
@@ -34,7 +35,11 @@ fn main() {
     if let Some(l) = std::env::var_os("GRIDS_LANG") { config.lang = if l == "en" { Lang::En } else { Lang::Zh } }
     let (w, h) = config.window.unwrap_or((1360., 860.));
     // The product name the interface and the taskbar show, in its language.
-    let brand = if config.lang == Lang::En { "PaneBoard" } else { "文件看板" };
+    let en = config.lang == Lang::En;
+    let brand = if en { "PaneBoard" } else { "文件看板" };
+    // The notification-area icon's menu, in the same language.
+    let tray_show = if en { "Show window" } else { "显示主窗口" };
+    let tray_quit = if en { "Quit" } else { "退出" };
     // The theme travels inside the exe: lay it down beside the settings first.
     if let Some(dir) = path.parent() { theme::install_bundled(dir); }
     // A theme pack: GRIDS_THEME wins over the settings file.
@@ -69,6 +74,30 @@ fn main() {
             |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)),
         );
         if let Ok(handle) = window {
+            // Closing the window hides it in the notification area; the icon's
+            // menu shows it again or quits for good. Without the icon (other
+            // platforms, or Windows refusing it) closing quits as before.
+            let (tx, mut rx) = futures::channel::mpsc::unbounded::<grids_shell::tray::TrayEvent>();
+            let tray = grids_shell::tray::install(brand, tray_show, tray_quit, move |ev| { let _ = tx.unbounded_send(ev); });
+            if tray {
+                cx.spawn(async move |cx| {
+                    while let Some(ev) = rx.next().await {
+                        match ev {
+                            grids_shell::tray::TrayEvent::Show => {
+                                let _ = handle.update(cx, |_, window, _| {
+                                    grids_shell::window::show(ui::hwnd(window));
+                                    window.refresh();
+                                    window.activate_window();
+                                });
+                            }
+                            grids_shell::tray::TrayEvent::Quit => {
+                                let _ = handle.update(cx, |ws, _, cx| ws.save_now(cx));
+                                let _ = cx.update(|cx| cx.quit());
+                            }
+                        }
+                    }
+                }).detach();
+            }
             let _ = handle.update(cx, |_, window, cx| {
                 app_icon::apply(ui::hwnd(window));
                 let ws = cx.entity();
@@ -78,7 +107,8 @@ fn main() {
                         if !window.is_maximized() { cx.global_mut::<state::Shared>().config.window = Some((f32::from(b.width), f32::from(b.height))) }
                         ws.save_now(cx);
                     });
-                    true
+                    // Hiding keeps the program (and every float window) alive.
+                    if tray { grids_shell::window::hide(ui::hwnd(window)); false } else { true }
                 });
             });
         }
