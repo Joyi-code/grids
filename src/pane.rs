@@ -741,8 +741,11 @@ impl PaneView {
                 let cancel = std::sync::atomic::AtomicBool::new(false);
                 let mut found: Vec<(u32, grids_core::listing::Entry)> = Vec::new();
                 grids_shell::search::walk(&root, &cancel, 120_000, &mut |f| {
-                    let text = f.path.to_string_lossy();
-                    if grids_core::search::matches(&f.name, &text, &terms) {
+                    // Only the part below the searched folder counts: the names
+                    // of its parents (drive, project, department) must not make
+                    // every file a hit.
+                    let rel = f.path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                    if grids_core::search::matches(&f.name, &rel, &terms) {
                         let score = grids_core::search::score(&f.name, &terms);
                         found.push((score, grids_core::listing::Entry {
                             name: f.name, path: f.path, is_dir: f.is_dir, size: f.size,
@@ -2259,6 +2262,7 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
 
 
 
