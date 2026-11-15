@@ -1798,8 +1798,10 @@ impl PaneView {
                     .on_click(cx.listener(move |this, _, _, cx| this.sort_by(key, cx)))
                     .child(
                         div().id(("col-resize", i)).absolute().right(px(0.)).top_0().h_full().w(px(12.)).flex().justify_center().cursor(CursorStyle::ResizeColumn)
-                            // A visible hairline marks the target; the 12 px band is the hit area.
-                            .child(div().w(px(1.)).h(px(12.)).mt(px(6.)).bg(Theme::line_border().alpha(0.55)))
+                            // A 12 px band is the hit area; the hairline only shows
+                            // while the pointer is on it.
+                            .group("colresize")
+                            .child(div().w(px(1.)).h(px(12.)).mt(px(6.)).invisible().group_hover("colresize", |s| s.visible()).bg(Theme::line_border()))
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_drag(ColResize { pane: id, col: i }, |d, _, _, cx| cx.new(|_| d.clone())),
@@ -2263,6 +2265,7 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
 
 
 
