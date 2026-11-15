@@ -1506,8 +1506,11 @@ impl PaneView {
             .font_weight(FontWeight::SEMIBOLD)
             .map(|d| if self.active { d.bg(Theme::primary()).text_color(gpui::white()) } else { d.text_color(Theme::text_placeholder()) })
             .child((self.index + 1).to_string());
+        // A locked pane dims and disables its whole header, padlock excepted.
+        let lock_root = state::locked_root(cx, &st.path);
+        let locked = lock_root.is_some();
         let path_area: AnyElement = if let Some((input, _)) = &self.address {
-            div().flex_1().min_w_0().h(px(FIELD_H)).px(px(8.)).rounded(px(8.)).flex().items_center().bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).child(div().flex_1().min_w_0().child(input.clone())).into_any_element()
+            div().flex_1().min_w_0().h(px(FIELD_H)).px(px(8.)).rounded(px(8.)).flex().items_center().bg(Theme::bg_body()).border_1().border_color(Theme::field_edge()).when(locked, |d| d.opacity(0.55)).child(div().flex_1().min_w_0().child(input.clone())).into_any_element()
         } else {
             let crumbs = paths::breadcrumbs(&st.path);
             let n = crumbs.len();
@@ -1529,34 +1532,35 @@ impl PaneView {
                 let parent = crumbs[skip - 1].1.clone();
                 let hidden: String = crumbs[..skip].iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(" › ");
                 row = row.child(
-                    div().id("crumb-fold").flex_none().h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().cursor_pointer()
+                    div().id("crumb-fold").flex_none().h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center()
                         .text_size(px(13.)).text_color(Theme::text_caption())
-                        .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
+                        .when(!locked, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text())))
                         .child("…")
                         .tip(&hidden, None)
-                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if ev.click_count() < 2 { this.navigate(parent.clone(), cx) } })),
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if !locked && ev.click_count() < 2 { this.navigate(parent.clone(), cx) } })),
                 ).child(div().mx(px(1.)).flex_none().child(icon("chevron-right", 12., Theme::icon_muted())));
             }
             for (i, (label, path)) in crumbs.into_iter().enumerate().skip(skip) {
                 let last = i + 1 == n;
                 row = row.child(
-                    div().id(("crumb", i)).h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().whitespace_nowrap().cursor_pointer()
-                        .map(|d| if last { d.min_w_0().overflow_hidden().text_ellipsis().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()) } else { d.flex_none().text_size(px(13.)).text_color(Theme::text_caption()) })
-                        .hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text()))
+                    div().id(("crumb", i)).h(px(24.)).px(px(4.)).rounded(px(6.)).flex().items_center().whitespace_nowrap()
+                        .map(|d| if last { d.min_w_0().overflow_hidden().text_ellipsis().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(if locked { Theme::text_caption() } else { Theme::text() }) } else { d.flex_none().text_size(px(13.)).text_color(Theme::text_caption()) })
+                        .when(!locked, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover()).text_color(Theme::text())))
                         .child(label)
-                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if ev.click_count() < 2 { this.navigate(path.clone(), cx) } })),
+                        .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| { cx.stop_propagation(); if !locked && ev.click_count() < 2 { this.navigate(path.clone(), cx) } })),
                 );
                 if !last { row = row.child(div().mx(px(1.)).flex_none().child(icon("chevron-right", 12., Theme::icon_muted()))) }
             }
             let crumbs_w = self.crumbs_w.clone();
             // Long paths keep their end (the folder) in view.
-            div().id("crumbs").relative().flex_1().min_w_0().h(px(FIELD_H)).flex().items_center().overflow_hidden().cursor_text()
+            div().id("crumbs").relative().flex_1().min_w_0().h(px(FIELD_H)).flex().items_center().overflow_hidden().when(locked, |d| d.opacity(0.55)).when(!locked, |d| d.cursor_text())
                 .child(canvas(move |b, window, _| {
                     let w = f32::from(b.size.width);
                     if (crumbs_w.replace(w) - w).abs() > 0.5 { window.request_animation_frame() }
                 }, |_, _, _, _| {}).absolute().size_full())
                 .child(row).child(div().flex_1().min_w(px(12.)))
-                .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    if locked { return }
                     cx.stop_propagation();
                     if ev.click_count() >= 2 {
                         this.addr_click = None;
@@ -1592,14 +1596,12 @@ impl PaneView {
                 .child(if en { format!("Pane {} of {n}", self.index + 1) } else { format!("第 {} 格 / 共 {n} 格", self.index + 1) })
         });
         // Read-only: the lock stays in view; unlocked it shows on hover.
-        let lock_root = state::locked_root(cx, &st.path);
         let brand = state::brand(cx);
         let lock_tip: SharedString = match &lock_root {
             Some(r) if r == &st.path => if en { format!("Read-only folder (inside {brand} only) · click to unlock") } else { format!("只读文件夹（仅在{brand}内生效）· 点击解锁") }.into(),
             Some(r) => if en { format!("Read-only: locked at “{}” · click to unlock", r.display()) } else { format!("只读：由「{}」锁定 · 点击解锁", r.display()) }.into(),
             None => if en { format!("Make read-only (inside {brand} only)") } else { format!("设为只读（仅在{brand}内生效）") }.into(),
         };
-        let locked = lock_root.is_some();
         let lock_btn = div().id("lock").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
             .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
             .child(if locked { icon("lock", 15., Theme::primary()) } else { icon("lock-open", 15., Theme::icon()) })
@@ -1620,11 +1622,12 @@ impl PaneView {
                 (true, true) => t("联动中 · 对比差异（绿色：仅此侧有，琥珀色：有差别）", "Linked · comparing (green: only here, amber: differs)").into(),
                 (true, false) => if en { format!("Linked (group {})", l.group + 1) } else { format!("联动中（第 {} 组）", l.group + 1) }.into(),
             };
-            div().id("link-dot").flex_none().size(px(18.)).flex().items_center().justify_center().cursor_pointer()
+            div().id("link-dot").flex_none().size(px(18.)).flex().items_center().justify_center()
+                .when(!locked, |d| d.cursor_pointer())
                 .map(|d| if l.compare && l.live { d.child(icon("git-compare", 14., c)) } else { d.child(div().size(px(9.)).rounded_full().border(px(1.5)).border_color(c).when(l.live, |d| d.bg(c))) })
                 .tip(&tip, None)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|this, ev: &ClickEvent, window, cx| { cx.stop_propagation(); this.link_menu(ev.position(), window, cx) }))
+                .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| { cx.stop_propagation(); if locked { return } this.link_menu(ev.position(), window, cx) }))
         });
         div()
             .id("pane-head")
@@ -1635,8 +1638,8 @@ impl PaneView {
             .gap(px(6.))
             .pl(px(12.))
             .pr(px(8.))
-            .on_click(cx.listener(|_, ev: &ClickEvent, _, cx| if ev.click_count() == 2 { cx.emit(PaneEvent::ToggleMaximize) }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, window, cx| { cx.stop_propagation(); cx.emit(PaneEvent::Activated); this.link_menu(ev.position, window, cx) }))
+            .on_click(cx.listener(move |_, ev: &ClickEvent, _, cx| if !locked && ev.click_count() == 2 { cx.emit(PaneEvent::ToggleMaximize) }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| { if locked { return } cx.stop_propagation(); cx.emit(PaneEvent::Activated); this.link_menu(ev.position, window, cx) }))
             .child(badge)
             .children(link_dot)
             .children(max_tag)
@@ -1648,20 +1651,21 @@ impl PaneView {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .when(quiet, |d| d.opacity(0.).group_hover("pane", |s| s.opacity(1.)))
                     .children(lock_in)
-                    .child(btn("back", "arrow-left", st.can_back()).tip(t("后退", "Back"), Some("Alt+←")).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
-                    .child(btn("fwd", "arrow-right", st.can_forward()).tip(t("前进", "Forward"), Some("Alt+→")).on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))))
-                    .child(btn("up", "arrow-up", st.can_up()).tip(t("上一级", "Up"), Some("Alt+↑")).on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
-                    .child(btn("view", view_glyph(self.view), true).tip(t("视图", "View"), Some("Ctrl+Shift+1…5")).on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
+                    .child(btn("back", "arrow-left", st.can_back() && !locked).tip(t("后退", "Back"), Some("Alt+←")).on_click(cx.listener(|this, _, _, cx| this.go_back(cx))))
+                    .child(btn("fwd", "arrow-right", st.can_forward() && !locked).tip(t("前进", "Forward"), Some("Alt+→")).on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))))
+                    .child(btn("up", "arrow-up", st.can_up() && !locked).tip(t("上一级", "Up"), Some("Alt+↑")).on_click(cx.listener(|this, _, _, cx| this.go_up(cx))))
+                    .child(btn("view", view_glyph(self.view), !locked).tip(t("视图", "View"), Some("Ctrl+Shift+1…5")).on_click(cx.listener(|this, ev: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         let at = ev.position();
                         this.view_menu(point(at.x - px(180.), at.y + px(14.)), window, cx)
                     })))
                     .child(
-                        div().id("fav").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
-                            .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
-                            .child(if fav { icon("star-fill", 16., Theme::star()) } else { icon("star", 16., Theme::icon()) })
-                            .tip(if fav { t("取消收藏", "Remove from favourites") } else { t("收藏此文件夹", "Add to favourites") }, None)
-                            .on_click(cx.listener(|this, _, _, cx| {
+                        div().id("fav").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center()
+                            .when(!locked, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))
+                            .child(if locked { icon("star", 16., Theme::text_disabled()) } else if fav { icon("star-fill", 16., Theme::star()) } else { icon("star", 16., Theme::icon()) })
+                            .tip(if locked { t("已锁定", "Locked") } else if fav { t("取消收藏", "Remove from favourites") } else { t("收藏此文件夹", "Add to favourites") }, None)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if locked { return }
                                 let p = this.state.path.clone();
                                 cx.global_mut::<state::Shared>().config.toggle_favourite(&p);
                                 cx.emit(PaneEvent::Changed);
@@ -2192,6 +2196,7 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
 
 
 
