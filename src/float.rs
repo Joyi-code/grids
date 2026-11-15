@@ -79,7 +79,7 @@ impl FloatPane {
         let alpha = self.alpha;
         let t = self.track.clone();
         let fill = ((alpha as f32 - 30.) / 70.).clamp(0., 1.);
-        div().flex_none().h(px(34.)).px(px(8.)).flex().items_center().gap(px(8.))
+        div().flex_none().h(px(28.)).px(px(6.)).flex().items_center().gap(px(8.))
             .bg(Theme::window()).border_b_1().border_color(Theme::line_divider())
             .child(
                 div().id("float-pin").h(px(24.)).px(px(9.)).rounded(px(6.)).flex().items_center().cursor_pointer()
@@ -136,4 +136,5 @@ impl Render for FloatPane {
             .child(div().flex_1().min_h_0().child(self.pane.clone()))
     }
 }
+
 

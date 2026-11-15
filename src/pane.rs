@@ -118,6 +118,8 @@ const FRESH_MAX: usize = 500;
 pub enum PaneEvent {
     /// The pane was clicked or focused: make it the active one.
     Activated,
+    /// The header asked for this pane in its own floating window.
+    Detach,
     /// Something worth saving changed (path, sort, columns, hidden).
     Changed,
     /// Files changed in these folders (after a copy, move, delete …).
@@ -1722,6 +1724,7 @@ impl PaneView {
                         let at = ev.position();
                         this.view_menu(point(at.x - px(180.), at.y + px(14.)), window, cx)
                     })))
+                    .child(btn("detach", "external-link", !locked).tip(t("弹出为浮动窗口", "Open in a floating window"), Some("Ctrl+Shift+D")).on_click(cx.listener(|_, _, _, cx| { cx.stop_propagation(); cx.emit(PaneEvent::Detach) })))
                     .child(
                         div().id("fav").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center()
                             .when(!locked, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))

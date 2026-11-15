@@ -351,6 +351,9 @@ impl Workspace {
             PaneEvent::Link(c) => if let Some(i) = this.panes.iter().position(|p| p == pane) { this.link_cmd(i, c, cx) },
             PaneEvent::Toast(msg) => this.show_toast(msg.clone(), cx),
             PaneEvent::AskDelete { paths, permanent } => this.ask_delete_files(pane.clone(), paths.clone(), *permanent, window, cx),
+            PaneEvent::Detach => {
+                if let Some(i) = this.panes.iter().position(|p| p == pane) { this.detach_pane(i, window, cx) }
+            }
             PaneEvent::ToggleMaximize => {
                 if let Some(i) = this.panes.iter().position(|p| p == pane) { this.active = i }
                 this.toggle_maximize(window, cx)
@@ -647,7 +650,6 @@ impl Workspace {
                     .tip(if self.maximized.is_some() { tr(cx, "还原宫格", "Restore grid") } else { tr(cx, "最大化当前窗格", "Maximize pane") }, Some("Ctrl+Shift+M"))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx))),
             )
-            .child(header_icon("detach", "external-link", 32., 17.).tip(tr(cx, "弹出为浮动窗口", "Open in a floating window"), Some("Ctrl+Shift+D")).on_click(cx.listener(|this, _, window, cx| this.detach_active(window, cx))))
             .child(header_icon("theme", theme_icon, 32., 17.).ml(px(2.)).tip(theme_tip, None).on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))))
             .children(controls)
             .when(!has_controls, |d| d.pr(px(8.)))
@@ -927,8 +929,12 @@ impl Workspace {
 
 
     /// Opens the active pane in its own small window; this one keeps its pane.
-    pub fn detach_active(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let index = self.active;
+    pub fn detach_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detach_pane(self.active, window, cx);
+    }
+
+    /// Opens pane `index` in its own small window; this one keeps its pane.
+    pub fn detach_pane(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = self.panes.get(index).cloned() else { return };
         let save = {
             let p = pane.read(cx);
