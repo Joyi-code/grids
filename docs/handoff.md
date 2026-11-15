@@ -12,14 +12,19 @@
 ## 2. 代码状态
 
 - 远端 `origin/main` = `58ef790`，对应已发布版本 **v0.9.10**。
-- 本地 `main` 领先远端 **10 个提交**，**没有推送**（用户要求推送前必须先征得同意）：
+- 本地 `main` 领先远端 **15 个提交**（到 `801c0b0` 为止），**没有推送**（用户要求推送前必须先征得同意）：
 
 ```
+801c0b0 float: pin and restore icons in the pane header, no window bar
+36e303a docs: handoff for the floating pane and the rest
 bc5f9f0 pane: a detach button in every pane header
 1592af5 float: a toolbar button for the floating window, a shorter slider
 1ee0de7 float: a detached pane window with pin, alpha slider and restore
 d2cbac6 docs: floating pane design, opacity as a 30-100% slider
 3bdc4f6 shell: always-on-top and window alpha primitives
+5e288c8 pane: the column separator follows a header hover
+87e5c68 pane: the column separator shows on hover only
+e707492 pane: a wider, visible column-resize handle
 feb3d55 search: split a Chinese phrase into two-character terms
 2fc960d search: ignore the names of folders above the search root
 2a3bb4c Version 0.9.11
