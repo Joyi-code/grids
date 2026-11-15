@@ -647,6 +647,7 @@ impl Workspace {
                     .tip(if self.maximized.is_some() { tr(cx, "还原宫格", "Restore grid") } else { tr(cx, "最大化当前窗格", "Maximize pane") }, Some("Ctrl+Shift+M"))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx))),
             )
+            .child(header_icon("detach", "external-link", 32., 17.).tip(tr(cx, "弹出为浮动窗口", "Open in a floating window"), Some("Ctrl+Shift+D")).on_click(cx.listener(|this, _, window, cx| this.detach_active(window, cx))))
             .child(header_icon("theme", theme_icon, 32., 17.).ml(px(2.)).tip(theme_tip, None).on_click(cx.listener(|this, _, window, cx| this.cycle_theme(window, cx))))
             .children(controls)
             .when(!has_controls, |d| d.pr(px(8.)))
@@ -1960,6 +1961,8 @@ fn mini_layout(cols: &[usize], on: bool) -> Div {
     }
     d
 }
+
+
 
 
 

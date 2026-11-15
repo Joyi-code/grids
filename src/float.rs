@@ -94,8 +94,9 @@ impl FloatPane {
                     })),
             )
             .child(
-                div().id("float-alpha").relative().h(px(18.)).w(px(150.)).rounded(px(9.)).bg(Theme::fill_hover())
-                    .child(div().absolute().left_0().top_0().h_full().rounded(px(9.)).w(px(150. * fill)).bg(Theme::primary().alpha(0.35)))
+                div().id("float-alpha").relative().h(px(18.)).w(px(96.)).rounded(px(9.)).bg(Theme::fill_hover())
+                    .child(div().absolute().left_0().top_0().h_full().rounded(px(8.)).w(px(96. * fill)).bg(Theme::primary().alpha(0.30)))
+                    .child(div().absolute().top(px(2.)).size(px(14.)).rounded_full().bg(Theme::primary()).left(px((96. * fill - 14.).max(0.))))
                     .child(canvas(move |b, _, _| t.set(b), |_, _, _, _| {}).absolute().size_full())
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                         this.dragging = true;
@@ -135,3 +136,4 @@ impl Render for FloatPane {
             .child(div().flex_1().min_h_0().child(self.pane.clone()))
     }
 }
+
