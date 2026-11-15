@@ -11,6 +11,7 @@ use crate::thumbs;
 use crate::ops::{self, Op};
 use grids_core::journal::OpKind;
 use crate::ui::{TipExt, icon, ui_text};
+use crate::workspace::Workspace;
 use futures::StreamExt;
 use gpui::{prelude::FluentBuilder, *};
 use grids_core::format;
@@ -242,6 +243,17 @@ struct Marquee {
     base: Vec<usize>,
 }
 
+/// What a floating window's pane needs to draw its own chrome: the pin and
+/// the restore icon sit in the header instead of a bar of their own.
+pub struct FloatCtl {
+    /// Above other windows.
+    pub pinned: Rc<Cell<bool>>,
+    /// The main window, which takes the folder back on restore.
+    pub workspace: Entity<Workspace>,
+    /// The grid slot this window was detached from.
+    pub index: usize,
+}
+
 
 pub struct PaneView {
     /// Position in the grid (shown as number + 1).
@@ -300,6 +312,9 @@ pub struct PaneView {
     pub link: Option<LinkView>,
     /// Panes in the grid, for the title menu.
     pub pane_count: usize,
+    /// Some: this pane fills a floating window and draws the window's own
+    /// pin and restore icons in its header.
+    pub float: Option<FloatCtl>,
 }
 
 impl EventEmitter<PaneEvent> for PaneView {}
@@ -353,6 +368,7 @@ impl PaneView {
             press_row: None,
             link: None,
             pane_count: 1,
+            float: None,
         };
         me.load(None, cx);
         me
@@ -360,6 +376,29 @@ impl PaneView {
 
     pub fn save(&self) -> PaneSave {
         PaneSave { path: self.state.path.clone(), sort: self.state.sort, ascending: self.state.ascending, show_hidden: self.state.show_hidden, columns: self.columns.clone(), view: self.view }
+    }
+
+    // ---- a floating window's own chrome (pin and restore)
+
+    /// Makes this pane the content of a floating window; its header then draws
+    /// the window's pin and restore icons instead of the detach button.
+    pub fn set_float(&mut self, ctl: FloatCtl) { self.float = Some(ctl) }
+
+    /// Pins the window above the others, or releases it.
+    fn toggle_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(on) = self.float.as_ref().map(|f| !f.pinned.get()) else { return };
+        if let Some(f) = &self.float { f.pinned.set(on) }
+        grids_shell::window::set_always_on_top(crate::ui::hwnd(window), on);
+        cx.notify();
+    }
+
+    /// Hands the window's folder, sort, view and columns back to the grid slot
+    /// it came from, then closes the window.
+    fn restore_from_float(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((ws, index)) = self.float.as_ref().map(|f| (f.workspace.clone(), f.index)) else { return };
+        let save = self.save();
+        ws.update(cx, |ws, cx| ws.adopt_float(index, save, cx));
+        window.remove_window();
     }
 
     // ---- loading
@@ -1639,7 +1678,8 @@ impl PaneView {
                 }))
                 .into_any_element()
         };
-        let quiet = !self.active;
+        // A floating window holds one pane: its buttons stay in view.
+        let quiet = !self.active && self.float.is_none();
         let btn = |id: &'static str, glyph: &'static str, enabled: bool| {
             div().id(id).size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center()
                 .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))
@@ -1694,6 +1734,28 @@ impl PaneView {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| { cx.stop_propagation(); if locked { return } this.link_menu(ev.position(), window, cx) }))
         });
+        // A floating window's own chrome sits in the header's button row, where
+        // the detach icon is: a pin and a restore icon, nothing else.
+        let floating = self.float.is_some();
+        let float_btns = self.float.as_ref().map(|f| {
+            let pinned = f.pinned.get();
+            let pin = div().id("float-pin").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
+                .when(pinned, |d| d.bg(Theme::primary().alpha(0.14)))
+                .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
+                .child(icon("pin", 16., if pinned { Theme::primary() } else { Theme::icon() }))
+                .tip(if pinned { t("取消置顶", "Release from the top") } else { t("置顶显示", "Keep above other windows") }, None)
+                .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.toggle_pin(window, cx) }));
+            let restore = div().id("float-restore").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center().cursor_pointer()
+                .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
+                .child(icon("undo-2", 16., Theme::icon()))
+                .tip(t("恢复到主界面", "Hand the folder back to the main window"), None)
+                .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.restore_from_float(window, cx) }));
+            div().flex().flex_none().items_center().gap(px(1.)).child(pin).child(restore)
+        });
+        // Nothing to detach in a floating window: it is the detached pane.
+        let detach = (!floating).then(|| btn("detach", "external-link", !locked)
+            .tip(t("弹出为浮动窗口", "Open in a floating window"), Some("Ctrl+Shift+D"))
+            .on_click(cx.listener(|_, _, _, cx| { cx.stop_propagation(); cx.emit(PaneEvent::Detach) })));
         div()
             .id("pane-head")
             .h(px(HEAD_H))
@@ -1703,7 +1765,7 @@ impl PaneView {
             .gap(px(6.))
             .pl(px(12.))
             .pr(px(8.))
-            .on_click(cx.listener(move |_, ev: &ClickEvent, _, cx| if !locked && ev.click_count() == 2 { cx.emit(PaneEvent::ToggleMaximize) }))
+            .on_click(cx.listener(move |_, ev: &ClickEvent, _, cx| if !locked && !floating && ev.click_count() == 2 { cx.emit(PaneEvent::ToggleMaximize) }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| { if locked { return } cx.stop_propagation(); cx.emit(PaneEvent::Activated); this.link_menu(ev.position, window, cx) }))
             .child(badge)
             .children(link_dot)
@@ -1724,7 +1786,8 @@ impl PaneView {
                         let at = ev.position();
                         this.view_menu(point(at.x - px(180.), at.y + px(14.)), window, cx)
                     })))
-                    .child(btn("detach", "external-link", !locked).tip(t("弹出为浮动窗口", "Open in a floating window"), Some("Ctrl+Shift+D")).on_click(cx.listener(|_, _, _, cx| { cx.stop_propagation(); cx.emit(PaneEvent::Detach) })))
+                    .children(detach)
+                    .children(float_btns)
                     .child(
                         div().id("fav").size(px(26.)).rounded(px(7.)).flex_none().flex().items_center().justify_center()
                             .when(!locked, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())))

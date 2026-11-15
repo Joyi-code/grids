@@ -39,7 +39,7 @@ feb3d55 search: split a Chinese phrase into two-character terms
 - 主题：`奶油猫咪`、`变形金刚`，编译进 exe，首启写入 `themes\`；主题选择在版本弹层，选完自动重启。
 - 一键更新：下载 → SHA-256 校验 → 只替换 exe → 重启；配置、日志、主题目录不动。
 - **目录树搜索（0.9.11 新增）**：Ctrl+F 递归搜索当前窗格目录，空格分词，中文按两字拆词，类型列显示命中的子目录。
-- **浮窗（0.9.11 新增，未完成标题栏改造）**：每个窗格标题栏有外链图标，弹出独立窗口；浮窗有置顶、30%–100% 透明度滑块、恢复到主界面、关闭。
+- **浮窗（0.9.11 新增，标题栏已图标化）**：每个窗格标题栏有外链图标，弹出独立窗口；浮窗里的窗格在原来的链接图标位置显示图钉（置顶）和恢复图标，没有独立顶栏，也没有透明度。
 
 ## 4. 发布政策（重要）
 
@@ -55,50 +55,30 @@ gh api -X PATCH repos/Joyi-code/grids/releases/$id -F draft=true   # 必须是 -
 - 提交身份用匿名邮箱（已设在本地仓库）：`像素与咖啡时光 <206511176+Joyi-code@users.noreply.github.com>`。
 - 推送、发版、删除内容前必须先问用户。
 
-## 5. 进行中的任务：浮窗标题栏图标化
+## 5. 已完成：浮窗标题栏图标化
 
-### 目标
+### 结果
 
-删掉浮窗顶部那条 28 像素的栏，把置顶、透明度、恢复做成窗格标题栏里的小图标；浮窗里的窗格不再显示外链图标（不能再弹一层）。
+- 浮窗没有自己的顶栏：浮窗就是一个窗格，控件在窗格标题栏里。
+- 浮窗标题栏在链接图标的位置依次显示图钉（置顶）和恢复（把目录交还主界面），都是图标。
+- 浮窗里的窗格不显示外链图标，不能再弹一层。
+- 透明度滑块按用户要求删除，`grids_shell::window::set_alpha` 一并移除；窗口移动、关闭用系统原生标题栏。
 
-### 现状
+### 实现
 
-- 浮窗顶部有栏：置顶、滑块、恢复到主界面、关闭。
-- 浮窗内的窗格标题栏仍有外链图标，能再弹出一层，是缺陷。
-- 窗格标题栏已有外链图标（主窗口可用）。
+- `src/pane.rs`：`FloatCtl { pinned: Rc<Cell<bool>>, workspace, index }`，字段 `PaneView.float`；`toggle_pin` 用 `ui::hwnd(window)` 调 `set_always_on_top`；`restore_from_float` 组 `PaneSave` → `workspace.adopt_float(index, save, cx)` → `window.remove_window()`。
+- `src/float.rs`：`FloatPane` 只剩 `Entity<PaneView>`，`bar()` 已删；创建后 `pane.set_float(FloatCtl { .. })`。
+- `src/assets.rs`：新增 `icons/pin.svg`（Lucide pin）。
+- 浮窗里的窗格按钮常显：`quiet` 额外要求 `self.float.is_none()`。
+- 浮窗标题栏双击不再发 `ToggleMaximize`。
 
-### 设计
+### 验收（2026-11-15 本机实测）
 
-`PaneView` 增加浮窗模式，共享状态用 `Rc<Cell<..>>`：
-
-```rust
-pub struct FloatCtl {
-    pub pinned: Rc<Cell<bool>>,
-    pub alpha: Rc<Cell<u8>>,
-    pub workspace: Entity<Workspace>, // 恢复时写回主窗口
-    pub index: usize,                 // 原来那一格的序号
-}
-```
-
-- 浮窗模式下标题栏右侧依次画：图钉（切换置顶）、紧凑滑块（70–96 px，透明度）、恢复图标、关闭；**不画外链图标**。
-- HWND 在渲染时用 `ui::hwnd(window)` 取，直接调用 `grids_shell::window::set_always_on_top` / `set_alpha`。
-- 恢复：读自身 `state.path`、`sort`、`ascending`、`show_hidden`、`columns`、`view` 组成 `PaneSave` → `workspace.adopt_float(index, save, cx)` → `window.remove_window()`。
-- `FloatPane` 只剩窗格本体，删掉 `bar()`。
-
-### 涉及文件
-
-- `src/pane.rs`：加 `float: Option<FloatCtl>` 字段、标题栏分支、恢复逻辑；`PaneEvent::Detach` 已存在。
-- `src/float.rs`：删 `bar()`，创建后 `pane.update(cx, |p, _| p.set_float(ctl))`。
-- `src/workspace.rs`：`detach_pane(index)`、`adopt_float(index, save, cx)` 已存在，一般不用改。
-
-### 验收
-
-1. 浮窗没有独立顶栏，控件在标题栏。
-2. 浮窗内的窗格没有外链图标。
-3. 图钉点击后窗口置顶/取消置顶。
-4. 滑块 30%–100% 连续拖动，窗口透明度实时变化，仍可点击。
-5. 恢复后主窗口对应窗格变成浮窗当前目录、排序、视图、列宽，浮窗关闭。
-6. 直接关闭浮窗不影响主窗口。
+1. 浮窗无独立顶栏，控件在标题栏。
+2. 浮窗内无外链图标。
+3. 图钉点击后窗口 `WS_EX_TOPMOST` 置位，再点清除。
+4. 恢复后主窗口对应窗格变成浮窗当前目录与视图，浮窗关闭。
+5. 用系统标题栏关闭浮窗，主窗口不变。
 
 ## 6. 其他待办
 

@@ -1,31 +1,30 @@
 # 浮动窗格（设计稿）
 
-从主窗口弹出一个独立的小窗口，显示同一个目录，可以置顶、可以调透明度。主窗口里原来的窗格保持不动。
+从主窗口弹出一个独立的小窗口，显示同一个目录，可以置顶。主窗口里原来的窗格保持不动。
 
 ## 已确定
 
 - 浮窗与主窗格**各自独立**：两边导航互不影响（用户选定的方案 A）。
-- 置顶：`SetWindowPos(HWND_TOPMOST)`，标题栏图钉切换。
-- 透明度：分层窗口 + `SetLayeredWindowAttributes`，**连续滑块 30%–100%**，拖动即时生效，半透明时仍可点击。
+- 浮窗没有自己的顶栏；置顶用标题栏里的图钉图标，恢复用标题栏里的恢复图标（用户 2026-11-15 的定稿）。
+- 置顶：`SetWindowPos(HWND_TOPMOST)`。
+- 透明度：**不做**。用户 2026-11-15 明确去掉滑块，`set_alpha` 已删。
 - 浮窗位置和大小记住，下次弹出恢复。
+- 浮窗关闭用系统原生标题栏的关闭按钮。
 
 ## 已具备
 
 `crates/shell/src/window.rs`：
 
 - `set_always_on_top(hwnd, on)`
-- `set_alpha(hwnd, percent)`（钳制到 30–100）
 
 `ui::hwnd(window)` 可以拿到任意窗口的 HWND。
 
-## 待做
+## 当前实现
 
-1. `src/float.rs`：`FloatPane` 实体，持有 `Entity<PaneView>`、`hwnd`、`pinned`、`alpha`、`FocusHandle`，渲染顶部条（图钉、滑块、关闭）加窗格本体。
-2. 入口：窗格右键菜单「弹出为浮动窗口」，以及快捷键 `Ctrl+Shift+D` 弹出当前窗格。
-3. `workspace.rs`：`cx.open_window(WindowOptions { window_bounds, titlebar, .. }, ...)`，标题「文件看板 · 浮窗」。
-4. 滑块：`on_drag` 或按下后跟随鼠标，拖动时调用 `set_alpha` 并记住值。
-5. 配置：在 `Config` 里加 `float: Option<FloatBounds>`（位置、大小、置顶、透明度），浮窗关闭时写回。
-6. 忽略：非 Windows 平台不启用置顶与透明度。
+1. `src/float.rs`：`FloatPane` 只持有 `Entity<PaneView>`，创建后调 `pane.set_float(FloatCtl { .. })`，没有顶栏。
+2. `src/pane.rs`：`PaneView.float = Some(FloatCtl)` 时，标题栏在链接图标的位置显示图钉与恢复两个图标；浮窗内不画外链图标。
+3. 入口：窗格标题栏的外链图标，以及快捷键 `Ctrl+Shift+D` 弹出当前窗格。
+4. 恢复：读浮窗窗格的 `path`、`sort`、`ascending`、`show_hidden`、`columns`、`view` 组成 `PaneSave`，交给主窗口的 `adopt_float`，然后关窗。
 
 ## 边界
 
