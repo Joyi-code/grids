@@ -948,10 +948,22 @@ impl Workspace {
             }
         };
         let ws = cx.entity();
+        // A floating window draws its own caption: no system title bar.
+        let brand = state::brand(cx);
+        let folder = save.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| save.path.display().to_string());
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                 point(px(480.), px(360.)), size(px(780.), px(560.)),
             ))),
+            app_id: Some("grids".into()),
+            window_decorations: if cfg!(target_os = "linux") { Some(WindowDecorations::Client) } else { None },
+            titlebar: Some(TitlebarOptions {
+                title: Some(format!("{brand} · {folder}").into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(14.), px(HEADER_H / 2. - 7.))),
+            }),
+            window_min_size: Some(size(px(420.), px(320.))),
+            window_background: theme::window_background(),
             ..Default::default()
         };
         let _ = cx.open_window(options, move |window, cx| {

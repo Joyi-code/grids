@@ -67,12 +67,14 @@ gh api -X PATCH repos/Joyi-code/grids/releases/$id -F draft=true   # 必须是 -
 - 浮窗没有自己的顶栏：浮窗就是一个窗格，控件在窗格标题栏里。
 - 浮窗标题栏在链接图标的位置依次显示图钉（置顶）和恢复（把目录交还主界面），都是图标。
 - 浮窗里的窗格不显示外链图标，不能再弹一层。
-- 透明度滑块按用户要求删除，`grids_shell::window::set_alpha` 一并移除；窗口移动、关闭用系统原生标题栏。
+- 透明度滑块按用户要求删除，`grids_shell::window::set_alpha` 一并移除。
+- 浮窗不显示系统标题栏，改成自绘标题栏：文件夹名 + 最小化/最大化/关闭，配色跟主窗口和主题的明暗一致；任务栏和 Alt+Tab 显示「文件看板 · 文件夹名」。
 
 ### 实现
 
 - `src/pane.rs`：`FloatCtl { pinned: Rc<Cell<bool>>, workspace, index }`，字段 `PaneView.float`；`toggle_pin` 用 `ui::hwnd(window)` 调 `set_always_on_top`；`restore_from_float` 组 `PaneSave` → `workspace.adopt_float(index, save, cx)` → `window.remove_window()`。
-- `src/float.rs`：`FloatPane` 只剩 `Entity<PaneView>`，`bar()` 已删；创建后 `pane.set_float(FloatCtl { .. })`。
+- `src/float.rs`：`FloatPane` 只剩 `Entity<PaneView>` 和观察它的订阅；`bar()` 画自绘标题栏（`title_bar()` 负责拖动，`ui::window_controls` 出窗口按钮）。
+- `src/workspace.rs`：`detach_pane` 的 `WindowOptions` 用 `appears_transparent: true` 去掉系统标题栏，`window_decorations` 只在 Linux 用 Client。
 - `src/assets.rs`：新增 `icons/pin.svg`（Lucide pin）。
 - 浮窗里的窗格按钮常显：`quiet` 额外要求 `self.float.is_none()`。
 - 浮窗标题栏双击不再发 `ToggleMaximize`。
@@ -83,7 +85,8 @@ gh api -X PATCH repos/Joyi-code/grids/releases/$id -F draft=true   # 必须是 -
 2. 浮窗内无外链图标。
 3. 图钉点击后窗口 `WS_EX_TOPMOST` 置位，再点清除。
 4. 恢复后主窗口对应窗格变成浮窗当前目录与视图，浮窗关闭。
-5. 用系统标题栏关闭浮窗，主窗口不变。
+5. 用自绘标题栏的关闭按钮（或系统快捷键）关闭浮窗，主窗口不变。
+6. 自绘标题栏能拖动窗口，最大化按钮生效；深色、浅色主题都跟着变。
 
 ## 6. 其他待办
 
