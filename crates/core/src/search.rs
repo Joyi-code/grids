@@ -2,8 +2,31 @@
 //! in the name or the folder path, in any order (Everything's default style).
 
 /// The terms of `query`, lower-cased; empty when the query is only spaces.
+///
+/// A Chinese phrase typed without spaces is split into two-character terms, so
+/// 「设备评价」 also finds 「设备状态评价…」: Windows tokenises the same way.
 pub fn terms(query: &str) -> Vec<String> {
-    query.split_whitespace().map(|t| t.to_lowercase()).collect()
+    let mut out: Vec<String> = Vec::new();
+    for raw in query.split_whitespace() {
+        let t = raw.to_lowercase();
+        let chars: Vec<char> = t.chars().collect();
+        if chars.len() >= 4 && chars.iter().all(|c| is_cjk(*c)) {
+            let mut i = 0;
+            while i + 1 < chars.len() {
+                out.push(chars[i..i + 2].iter().collect());
+                i += 2;
+            }
+            if i < chars.len() { out.push(chars[i].to_string()) }
+        } else {
+            out.push(t);
+        }
+    }
+    out.dedup();
+    out
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
 }
 
 /// Whether every term appears somewhere in `name` or `path` (both case-folded
@@ -29,6 +52,16 @@ pub fn score(name: &str, terms: &[String]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chinese_without_spaces_is_split() {
+        let t = terms("设备评价");
+        assert_eq!(t, vec!["设备", "评价"]);
+        let t = terms("设备评价"); 
+        assert!(matches("设备状态评价和异常分析v1.2.docx", "", &t));
+        assert!(matches("配网设备运行状态综合评价页面.png", "", &t));
+        assert!(!matches("设备台账.xlsx", "", &t));
+    }
 
     #[test]
     fn every_term_must_hit() {
@@ -62,4 +95,6 @@ mod tests {
         assert_eq!(score("其他.docx", &t), 40);
     }
 }
+
+
 
