@@ -43,6 +43,7 @@ use other as imp;
 
 mod zip;
 pub mod search;
+pub mod window;
 
 /// A mounted drive / volume root.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1376,4 +1377,5 @@ mod tests {
         assert!(!drives().is_empty());
     }
 }
+
 
