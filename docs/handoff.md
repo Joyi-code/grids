@@ -11,25 +11,16 @@
 
 ## 2. 代码状态
 
-- 远端 `origin/main` = `58ef790`，对应已发布版本 **v0.9.10**。
-- 本地 `main` 领先远端 **15 个提交**（到 `801c0b0` 为止），**没有推送**（用户要求推送前必须先征得同意）：
+- 远端 `origin/main` = `97f595b`（2026-11-15 已推送）；已发布版本仍是 **v0.9.10**（`58ef790`）。
+- 本地 `main` 与 `origin/main` 同步，工作区干净。
+- 本次浮窗改造的提交：
 
 ```
+97f595b float: the window draws its own caption in the app's colours
+4ec5da5 docs: handoff after the floating pane header work
 801c0b0 float: pin and restore icons in the pane header, no window bar
 36e303a docs: handoff for the floating pane and the rest
 bc5f9f0 pane: a detach button in every pane header
-1592af5 float: a toolbar button for the floating window, a shorter slider
-1ee0de7 float: a detached pane window with pin, alpha slider and restore
-d2cbac6 docs: floating pane design, opacity as a 30-100% slider
-3bdc4f6 shell: always-on-top and window alpha primitives
-5e288c8 pane: the column separator follows a header hover
-87e5c68 pane: the column separator shows on hover only
-e707492 pane: a wider, visible column-resize handle
-feb3d55 search: split a Chinese phrase into two-character terms
-2fc960d search: ignore the names of folders above the search root
-2a3bb4c Version 0.9.11
-6450a6e search: Ctrl+F now searches the folder tree
-42a7a17 search: matcher and folder walker for the deep search
 ```
 
 - 本地已编译的最新程序：`D:\tmp\grids-dev\grids-0.9.11.exe`（配置与主题在同目录）。
@@ -44,7 +35,7 @@ feb3d55 search: split a Chinese phrase into two-character terms
 - 主题：`奶油猫咪`、`变形金刚`，编译进 exe，首启写入 `themes\`；主题选择在版本弹层，选完自动重启。
 - 一键更新：下载 → SHA-256 校验 → 只替换 exe → 重启；配置、日志、主题目录不动。
 - **目录树搜索（0.9.11 新增）**：Ctrl+F 递归搜索当前窗格目录，空格分词，中文按两字拆词，类型列显示命中的子目录。
-- **浮窗（0.9.11 新增，标题栏已图标化）**：每个窗格标题栏有外链图标，弹出独立窗口；浮窗里的窗格在原来的链接图标位置显示图钉（置顶）和恢复图标，没有独立顶栏，也没有透明度。
+- **浮窗（0.9.11 新增，标题栏已图标化）**：每个窗格标题栏有外链图标，弹出独立窗口；浮窗里的窗格在原来的链接图标位置显示图钉（置顶）和恢复图标，没有独立顶栏，也没有透明度；窗口用自绘标题栏（文件夹名 + 窗口按钮），不显示系统标题栏。
 
 ## 4. 发布政策（重要）
 
