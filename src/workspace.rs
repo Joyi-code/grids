@@ -28,7 +28,7 @@ mod history;
 
 actions!(
     workspace,
-    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette, OpenToday, UndoLast, OpenHistory]
+    [NextPane, PrevPane, Pane1, Pane2, Pane3, Pane4, Pane5, Pane6, Pane7, Pane8, Pane9, ToggleMaximize, ToggleSidebar, PickLayout, CycleTheme, CloseAbout, SwapLeft, SwapRight, SwapUp, SwapDown, DialogCancel, DialogAccept, DialogNext, CommandPalette, OpenToday, UndoLast, OpenHistory, DetachPane]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -39,6 +39,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-k", CommandPalette, c),
         KeyBinding::new("secondary-z", UndoLast, c),
+        KeyBinding::new("ctrl-shift-d", DetachPane, c),
         KeyBinding::new("ctrl-tab", NextPane, c),
         KeyBinding::new("ctrl-shift-tab", PrevPane, c),
         KeyBinding::new("secondary-1", Pane1, c),
@@ -921,6 +922,54 @@ impl Workspace {
             });
             break;
         }).detach();
+    }
+
+
+    /// Opens the active pane in its own small window; this one keeps its pane.
+    pub fn detach_active(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.active;
+        let Some(pane) = self.panes.get(index).cloned() else { return };
+        let save = {
+            let p = pane.read(cx);
+            grids_core::session::PaneSave {
+                path: p.state.path.clone(),
+                sort: p.state.sort,
+                ascending: p.state.ascending,
+                show_hidden: p.state.show_hidden,
+                columns: p.columns.clone(),
+                view: p.view,
+            }
+        };
+        let ws = cx.entity();
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                point(px(480.), px(360.)), size(px(780.), px(560.)),
+            ))),
+            ..Default::default()
+        };
+        let _ = cx.open_window(options, move |window, cx| {
+            cx.new(|cx| crate::float::FloatPane::new(save, index, ws, window, cx))
+        });
+    }
+
+    /// A floating window's folder, sort, view and columns land back in `index`,
+    /// or in the active pane when that index no longer exists.
+    pub fn adopt_float(&mut self, index: usize, save: grids_core::session::PaneSave, cx: &mut Context<Self>) {
+        if self.panes.is_empty() { return }
+        let target = if index < self.panes.len() { index } else { self.active.min(self.panes.len() - 1) };
+        if let Some(pane) = self.panes.get(target).cloned() {
+            pane.update(cx, |p, cx| {
+                p.state.sort = save.sort;
+                p.state.ascending = save.ascending;
+                p.state.show_hidden = save.show_hidden;
+                p.columns = save.columns.clone();
+                p.view = save.view;
+                p.navigate(save.path.clone(), cx);
+            });
+            self.active = target;
+        }
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// "v0.9.0" at the bottom left (the sidebar's foot, or the status bar's
@@ -1847,6 +1896,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SwapUp, w, cx| this.swap_pane(0, -1, w, cx)))
             .on_action(cx.listener(|this, _: &SwapDown, w, cx| this.swap_pane(0, 1, w, cx)))
             .on_action(cx.listener(|this, _: &CycleTheme, window, cx| this.cycle_theme(window, cx)))
+            .on_action(cx.listener(|this, _: &DetachPane, window, cx| this.detach_active(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(window, cx)))
             .on_action(cx.listener(|this, _: &OpenToday, window, cx| this.open_today(window, cx)))
             .on_action(cx.listener(|this, _: &UndoLast, window, cx| this.undo_last(window, cx)))

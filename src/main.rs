@@ -3,6 +3,7 @@
 
 mod app_icon;
 mod assets;
+mod float;
 mod input;
 mod menu;
 mod ops;
@@ -156,5 +157,6 @@ fn install_crash_log() {
 fn crash_log_path() -> Option<std::path::PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("grids-crash.log"))
 }
+
 
 
