@@ -11,17 +11,15 @@
 
 ## 2. 代码状态
 
-- 远端 `origin/main` = `97e50e6`（2026-11-15 已推送）；已发布版本 **v0.9.11**（tag `v0.9.11` = `97e50e6`），资产 `grids-0.9.11.exe`，9,685,504 字节，SHA256 `9EB33495A5DDCE07CACBE5BE7DB075980EEE8490559579B0EFD873B0885A40FA`。
-- 上一版 `v0.9.10` 已按政策转成草稿；公开的只有 v0.9.11。
+- 已发布版本 **v0.9.12**（tag `v0.9.12`）：资产 `grids-0.9.12.exe`，9,699,840 字节，SHA256 `05E46EA38D42000E5F851D55A1DCD7696E1B0164283FBCF3D50588BD25512A59`。代码内容 = `b569a30`（关闭即隐藏）+ `Version 0.9.12` 版本号提交。
+- 上一版 `v0.9.11`、`v0.9.10` 已按政策转成草稿；公开的只有 v0.9.12。
 - 本地 `main` 与 `origin/main` 同步，工作区干净。
-- 本次浮窗改造的提交：
+- 最近提交：
 
 ```
-97f595b float: the window draws its own caption in the app's colours
-4ec5da5 docs: handoff after the floating pane header work
-801c0b0 float: pin and restore icons in the pane header, no window bar
-36e303a docs: handoff for the floating pane and the rest
-bc5f9f0 pane: a detach button in every pane header
+b569a30 app: closing the window hides it in the notification area
+2356a15 docs: handoff for v0.9.11
+97e50e6 docs: handoff after the push
 ```
 
 - 本地已编译的最新程序：`D:\tmp\grids-dev\grids-0.9.11.exe`（配置与主题在同目录）。
@@ -37,7 +35,7 @@ bc5f9f0 pane: a detach button in every pane header
 - 一键更新：下载 → SHA-256 校验 → 只替换 exe → 重启；配置、日志、主题目录不动。
 - **目录树搜索（0.9.11 新增）**：Ctrl+F 递归搜索当前窗格目录，空格分词，中文按两字拆词，类型列显示命中的子目录。
 - **浮窗（0.9.11 新增，标题栏已图标化）**：每个窗格标题栏有外链图标，弹出独立窗口；浮窗里的窗格在原来的链接图标位置显示图钉（置顶）和恢复图标，没有独立顶栏，也没有透明度；窗口用自绘标题栏（文件夹名 + 窗口按钮），不显示系统标题栏。
-- **关闭即隐藏（未发版）**：主窗口点关闭不退出，收进右下角通知区；托盘图标单击恢复窗口，右键菜单「显示主窗口」「退出」，退出前先保存会话。浮窗点关闭仍然只关那一个窗口。Windows 专属；其他平台或托盘创建失败时保持关闭即退出。
+- **关闭即隐藏（0.9.12 新增）**：主窗口点关闭不退出，收进右下角通知区；托盘图标单击恢复窗口，右键菜单「显示主窗口」「退出」，退出前先保存会话。浮窗点关闭仍然只关那一个窗口。Windows 专属；其他平台或托盘创建失败时保持关闭即退出。
 
 ## 4. 发布政策（重要）
 
