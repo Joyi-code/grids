@@ -261,6 +261,11 @@ pub struct PaneView {
     crumbs_w: Rc<Cell<f32>>,
     address: Option<(Entity<TextInput>, Vec<Subscription>)>,
     filter: Option<(Entity<TextInput>, Vec<Subscription>)>,
+    /// Deep search: the listing holds hits under `deep_root` instead of the
+    /// folder's own entries. `search_gen` drops answers to older queries.
+    deep: bool,
+    deep_root: std::path::PathBuf,
+    search_gen: u64,
     rename: Option<RenameState>,
     menu: Option<(Entity<MenuView>, Subscription)>,
     load_seq: u64,
@@ -324,6 +329,9 @@ impl PaneView {
             header_bounds: Rc::default(),
             address: None,
             filter: None,
+            deep: false,
+            deep_root: std::path::PathBuf::new(),
+            search_gen: 0,
             rename: None,
             menu: None,
             load_seq: 0,
@@ -683,9 +691,7 @@ impl PaneView {
         let subs = vec![cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
             InputEvent::Changed => {
                 let t = input.read(cx).text().to_string();
-                this.state.set_filter(&t);
-                this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                cx.notify();
+                this.run_search(t, cx);
             }
             InputEvent::Submit => window.focus(&this.focus),
             InputEvent::Cancel => this.end_filter(window, cx),
@@ -698,8 +704,62 @@ impl PaneView {
     fn end_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter = None;
         self.state.set_filter("");
+        if self.deep {
+            self.deep = false;
+            self.search_gen += 1;
+            self.load(None, cx);
+        }
         window.focus(&self.focus);
         cx.notify();
+    }
+
+    /// Deep search: walks the pane's folder in the background and shows the
+    /// hits in place of the listing. An empty box goes back to the folder.
+    fn run_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let terms = grids_core::search::terms(&query);
+        if terms.is_empty() {
+            self.search_gen += 1;
+            if self.deep {
+                self.deep = false;
+                self.load(None, cx);
+            }
+            self.state.set_filter("");
+            self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+            cx.notify();
+            return;
+        }
+        let root = self.state.path.clone();
+        self.deep = true;
+        self.deep_root = root.clone();
+        self.search_gen += 1;
+        let generation = self.search_gen;
+        // The hits are already filtered, so the pane's own name filter is off.
+        self.state.set_filter("");
+        cx.spawn(async move |this, cx| {
+            let terms = terms.clone();
+            let hits = cx.background_executor().spawn(async move {
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let mut found: Vec<(u32, grids_core::listing::Entry)> = Vec::new();
+                grids_shell::search::walk(&root, &cancel, 120_000, &mut |f| {
+                    let text = f.path.to_string_lossy();
+                    if grids_core::search::matches(&f.name, &text, &terms) {
+                        let score = grids_core::search::score(&f.name, &terms);
+                        found.push((score, grids_core::listing::Entry {
+                            name: f.name, path: f.path, is_dir: f.is_dir, size: f.size,
+                            modified: f.modified, hidden: f.hidden, ext: f.ext,
+                        }));
+                    }
+                });
+                found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+                found.into_iter().map(|(_, e)| e).take(5000).collect::<Vec<_>>()
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_gen != generation || !this.deep { return }
+                this.state.set_entries(hits, None);
+                this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            });
+        }).detach();
     }
 
     // ---- rename and new folder
@@ -1897,7 +1957,10 @@ impl PaneView {
             .when(cursor && !selected, |d| d.border_1().border_color(Theme::line_border()))
             .child(name_cell)
             .when(widths[1] > 0., |d| d.child(cell(widths[1], short_date(format::date(e.modified, offset), widths[1]), false)))
-            .when(widths[2] > 0., |d| d.child(cell(widths[2], format::type_name(e, lang), false)))
+            .when(widths[2] > 0., |d| d.child(cell(widths[2], if self.deep {
+        e.path.strip_prefix(&self.deep_root).ok().and_then(|p| p.parent()).map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.is_empty())
+            .unwrap_or_else(|| if state::en(cx) { "this folder".to_string() } else { "当前目录".to_string() })
+    } else { format::type_name(e, lang) }, false)))
             .when(widths[3] > 0., |d| d.child(cell(widths[3], size, true)));
         self.item_events(row, r, e, selected, cx)
             .into_any_element()
@@ -1966,7 +2029,7 @@ impl Render for PaneView {
         let empty: Option<AnyElement> = if let Some(err) = &self.state.error {
             Some(div().absolute().top(px(24.)).left_0().right_0().px(px(12.)).flex().justify_center().text_color(Theme::text_caption()).child(err.clone()).into_any_element())
         } else if n == 0 && !self.loading {
-            let msg = if !self.state.filter.is_empty() { if en { "No matching items." } else { "没有匹配的项目。" } } else if en { "This folder is empty." } else { "此文件夹为空。" }.to_string();
+            let msg: String = if self.deep && n == 0 { if en { "Nothing matched in this folder tree.".into() } else { "这个目录树下没有匹配的文件。".into() } } else if !self.state.filter.is_empty() { if en { "No matching items.".into() } else { "没有匹配的项目。".into() } } else if en { "This folder is empty.".into() } else { "此文件夹为空。".into() };
             let pick = |light: &'static str, dark: &'static str| -> Option<&'static str> {
                 if theme::dark() && theme::has(dark) { Some(dark) } else if theme::has(light) { Some(light) } else { None }
             };
@@ -2196,6 +2259,8 @@ mod tests {
         assert_eq!(open_plan(Path::new("x.txt"), None, true), OpenPlan::System("x.txt".into()));
     }
 }
+
+
 
 
 
