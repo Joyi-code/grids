@@ -42,6 +42,7 @@ mod other;
 use other as imp;
 
 mod zip;
+pub mod instance;
 pub mod search;
 pub mod tray;
 pub mod window;

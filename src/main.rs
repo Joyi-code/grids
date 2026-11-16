@@ -26,6 +26,10 @@ use std::path::Path;
 fn main() {
     // A copy of this exe swaps in a downloaded update once the window is gone.
     if let Some(code) = update::apply_from_args() { std::process::exit(code) }
+    // One Grids at a time: a second launch asks the running one to come
+    // forward (it may be hidden in the notification area), then ends, so the
+    // taskbar never grows a second button for the same program.
+    if !grids_shell::instance::claim() { return }
     // A previous swap leaves the replaced exe behind; it is no longer needed.
     if let Ok(exe) = std::env::current_exe() { let _ = std::fs::remove_file(exe.with_extension("old.exe")); }
     install_crash_log();
@@ -80,9 +84,12 @@ fn main() {
             // Closing the window hides it in the notification area; the icon's
             // menu shows it again or quits for good. Without the icon (other
             // platforms, or Windows refusing it) closing quits as before.
+            // A second launch of the exe also shows the window: it is the one
+            // case where the user asks for it without the icon.
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<grids_shell::tray::TrayEvent>();
-            let tray = grids_shell::tray::install(brand, tray_show, tray_quit, move |ev| { let _ = tx.unbounded_send(ev); });
-            if tray {
+            let tray = { let tx = tx.clone(); grids_shell::tray::install(brand, tray_show, tray_quit, move |ev| { let _ = tx.unbounded_send(ev); }) };
+            let watched = { let tx = tx.clone(); grids_shell::instance::watch(move || { let _ = tx.unbounded_send(grids_shell::tray::TrayEvent::Show); }) };
+            if tray || watched {
                 cx.spawn(async move |cx| {
                     while let Some(ev) = rx.next().await {
                         match ev {

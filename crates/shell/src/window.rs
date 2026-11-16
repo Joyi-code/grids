@@ -24,17 +24,24 @@ pub fn set_always_on_top(hwnd: isize, on: bool) {
 #[cfg(not(windows))]
 pub fn set_always_on_top(_hwnd: isize, _on: bool) {}
 
-/// Shows `hwnd` again after [`hide`] and gives it the foreground (the click on
-/// the notification-area icon is the user's intent to come back).
+/// Shows `hwnd` again after [`hide`] (or restores it from minimised) and gives
+/// it the foreground: a click on the notification-area icon, or a second
+/// launch, is the user's intent to come back.
 #[cfg(windows)]
 pub fn show(hwnd: isize) {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, SetForegroundWindow, ShowWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    };
     if hwnd == 0 { return }
     let hwnd = HWND(hwnd as _);
     // SAFETY: plain Win32 calls on a window this process owns.
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
 }
