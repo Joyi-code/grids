@@ -7,6 +7,7 @@ mod confirm;
 mod float;
 mod input;
 mod menu;
+mod note_card;
 mod ops;
 mod pane;
 mod state;
@@ -56,6 +57,7 @@ fn main() {
         pane::bind_keys(cx);
         menu::bind_keys(cx);
         workspace::bind_keys(cx);
+        float::bind_keys(cx);
         cx.set_global(state::Shared::new(config, path));
         let bounds = Bounds::centered(None, size(px(w.max(640.)), px(h.max(420.))), cx);
         let window = cx.open_window(

@@ -1347,10 +1347,7 @@ impl PaneView {
             v.push(Item::row(t("压缩为 ZIP 文件", "Compress to ZIP file"), "file-archive", "", Cmd::Zip).enabled(!ro));
             if let Some(dir) = &folder {
                 let has = grids_core::notes::get(&state::shared(cx).config.notes, dir).is_some();
-                // Notes are edited in the grid's dialog; a floating pane has none.
-                if self.float.is_none() {
-                    v.push(Item::row(if has { t("编辑备注", "Edit note") } else { t("添加备注", "Add note") }, "sticky-note", "", Cmd::EditNote(dir.clone())));
-                }
+                v.push(Item::row(if has { t("编辑备注", "Edit note") } else { t("添加备注", "Add note") }, "sticky-note", "", Cmd::EditNote(dir.clone())));
                 let fav = state::shared(cx).config.is_favourite(dir);
                 v.push(Item::row(if fav { t("从收藏夹移除", "Remove from favourites") } else { t("添加到收藏夹", "Add to favourites") }, if fav { "star-off" } else { "star" }, "", Cmd::ToggleFavourite(dir.clone())));
             }
@@ -1393,12 +1390,9 @@ impl PaneView {
                 Item::Sep,
                 Item::row(t("在终端中打开", "Open in Terminal"), "terminal", "", Cmd::Terminal),
                 Item::row(t("复制文件夹路径", "Copy folder path"), "link", "", Cmd::CopyFolderPath),
-                // Notes are edited in the grid's dialog; a floating pane has none.
-                if self.float.is_none() {
+                {
                     let has = grids_core::notes::get(&state::shared(cx).config.notes, &self.state.path).is_some();
                     Item::row(if has { t("编辑此文件夹的备注", "Edit this folder's note") } else { t("为此文件夹添加备注", "Add a note to this folder") }, "sticky-note", "", Cmd::EditNote(self.state.path.clone()))
-                } else {
-                    Item::Sep
                 },
                 Item::row(t("属性", "Properties"), "info", "", Cmd::FolderProperties).enabled(cfg!(windows)),
                 Item::Sep,

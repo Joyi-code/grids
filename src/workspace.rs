@@ -3,6 +3,7 @@
 
 use crate::confirm;
 use crate::input::{InputEvent, TextInput};
+use crate::note_card;
 use crate::ops::{self, Op};
 use crate::pane::{DraggedFiles, PaneEvent, PaneView};
 use crate::state::{self, Shared, tr};
@@ -25,7 +26,7 @@ mod lockers;
 pub use lockers::Then as LockersThen;
 mod palette;
 mod today;
-mod history;
+pub(crate) mod history;
 
 actions!(
     workspace,
@@ -475,6 +476,13 @@ impl Workspace {
     /// folders reload (the floating pane has reloaded itself already).
     pub fn files_changed(&mut self, dirs: &[PathBuf], cx: &mut Context<Self>) {
         self.fs_changed(dirs, cx);
+    }
+
+    /// A folder note was edited in a floating pane: save it and redraw the
+    /// note lines of the grid's panes.
+    pub fn note_saved(&mut self, cx: &mut Context<Self>) {
+        self.schedule_save(cx);
+        for p in self.panes.clone() { p.update(cx, |_, cx| cx.notify()) }
     }
 
     fn load_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
@@ -1573,61 +1581,28 @@ impl Workspace {
         let n = ed.input.read(cx).text().trim().chars().count();
         let max = grids_core::notes::MAX_NOTE_CHARS;
         let name = ed.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| ed.folder.to_string_lossy().into_owned());
-        let button = |id: &'static str, label: SharedString, primary: bool| {
-            div().id(id).h(px(30.)).min_w(px(76.)).px(px(14.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
-                .map(|d| if primary {
-                    d.bg(Theme::primary()).text_color(gpui::white()).font_weight(FontWeight::MEDIUM).hover(|s| s.opacity(0.9))
-                } else {
-                    d.bg(Theme::fill_hover_strong()).text_color(Theme::text()).hover(|s| s.bg(Theme::fill_pressed()))
-                })
-                .child(label)
+        let buttons = div().flex().items_center().gap(px(8.))
+            .when(ed.had, |d| d.child(div().id("note-remove").h(px(30.)).px(px(10.)).rounded(px(7.)).flex().items_center().cursor_pointer()
+                .text_color(Theme::danger()).hover(|s| s.bg(Theme::fill_hover()))
+                .child(t("删除备注", "Remove note"))
+                .on_click(cx.listener(|this, _, window, cx| this.close_note(Some(true), window, cx)))))
+            .child(div().flex_1())
+            .child(confirm::button("note-cancel", t("取消", "Cancel"), confirm::Kind::Plain, false)
+                .on_click(cx.listener(|this, _, window, cx| this.close_note(None, window, cx))))
+            .child(confirm::button("note-save", t("保存", "Save"), confirm::Kind::Accent, false)
+                .on_click(cx.listener(|this, _, window, cx| this.close_note(Some(false), window, cx))));
+        let note = note_card::Note {
+            name: name.into(),
+            title: if ed.had { t("编辑备注", "Edit note") } else { t("添加备注", "Add note") },
+            input: ed.input.clone(),
+            hint: t("仅保存在 Grids 中，在其他程序里改名会丢失备注", "Kept in Grids only; renaming elsewhere loses it"),
+            count: n,
+            max,
         };
-        let card = div()
-            .id("note-card")
-            .w(px(400.))
-            .p(px(20.))
-            .pb(px(16.))
-            .flex()
-            .flex_col()
-            .bg(theme::raised(Theme::popover_bg()))
-            .border_1()
-            .border_color(Theme::line_border())
-            .rounded(px(8.))
-            .shadow(theme::shadow_menu())
-            .font_family(theme::UI_FONT)
-            .text_size(px(13.))
-            .text_color(Theme::text())
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().flex().items_center().gap(px(8.))
-                .child(icon("sticky-note", 16., Theme::star()))
-                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(if ed.had { t("编辑备注", "Edit note") } else { t("添加备注", "Add note") })))
-            .child(div().mt(px(6.)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(Theme::text_caption()).child(ui_text(name)))
-            .child(div().mt(px(12.)).h(px(32.)).px(px(8.)).rounded(px(7.)).flex().items_center().bg(Theme::bg_body()).border_1().border_color(Theme::field_edge())
-                .child(div().flex_1().min_w_0().child(ed.input.clone())))
-            .child(div().mt(px(6.)).flex().items_center().gap(px(8.)).text_size(px(11.)).text_color(Theme::text_placeholder())
-                .child(div().flex_1().min_w_0().child(t("仅保存在 Grids 中，在其他程序里改名会丢失备注", "Kept in Grids only; renaming elsewhere loses it")))
-                .child(div().flex_none().map(|d| if n > max { d.text_color(Theme::danger()) } else { d }).child(format!("{n} / {max}"))))
-            .child(
-                div().mt(px(16.)).flex().items_center().gap(px(8.))
-                    .when(ed.had, |d| d.child(div().id("note-remove").h(px(30.)).px(px(10.)).rounded(px(7.)).flex().items_center().cursor_pointer()
-                        .text_color(Theme::danger()).hover(|s| s.bg(Theme::fill_hover()))
-                        .child(t("删除备注", "Remove note"))
-                        .on_click(cx.listener(|this, _, window, cx| this.close_note(Some(true), window, cx)))))
-                    .child(div().flex_1())
-                    .child(button("note-cancel", t("取消", "Cancel"), false).on_click(cx.listener(|this, _, window, cx| this.close_note(None, window, cx))))
-                    .child(button("note-save", t("保存", "Save"), true).on_click(cx.listener(|this, _, window, cx| this.close_note(Some(false), window, cx)))),
-            );
-        Some(
-            deferred(
-                div().id("note-scrim").absolute().inset_0().flex().items_center().justify_center().bg(gpui::black().opacity(0.18)).occlude()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_note(None, window, cx)))
-                    .child(card)
-                    .with_animation("note-fade", Animation::new(Duration::from_millis(110)), |d, t| d.opacity(t)),
-            )
-            .with_priority(5)
-            .into_any_element(),
-        )
+        let card = note_card::card(&note, buttons);
+        let scrim = confirm::scrim(card)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_note(None, window, cx)));
+        Some(confirm::fade(scrim))
     }
 
     // ---- the shelf
@@ -1940,6 +1915,7 @@ fn mini_layout(cols: &[usize], on: bool) -> Div {
     }
     d
 }
+
 
 
 

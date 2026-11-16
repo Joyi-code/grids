@@ -47,7 +47,7 @@ fn name_of(p: &Path) -> String {
 }
 
 /// "复制「a.txt」到 文档" style one-liners.
-fn summary(r: &Record, en: bool) -> String {
+pub(crate) fn summary(r: &Record, en: bool) -> String {
     let n = r.items.len();
     let first = r.items.first();
     let what = match (n, first) {
@@ -89,13 +89,13 @@ fn kind_icon(k: OpKind) -> &'static str {
 }
 
 /// What one undo did, for the toast and the refresh.
-struct Outcome {
+pub(crate) struct Outcome {
     /// Moved back / renamed back.
-    items: Vec<OpItem>,
-    recycled: Vec<OpItem>,
-    restored: Vec<PathBuf>,
-    failed: Vec<String>,
-    dirs: Vec<PathBuf>,
+    pub(crate) items: Vec<OpItem>,
+    pub(crate) recycled: Vec<OpItem>,
+    pub(crate) restored: Vec<PathBuf>,
+    pub(crate) failed: Vec<String>,
+    pub(crate) dirs: Vec<PathBuf>,
 }
 
 /// Runs `steps` (background thread). A move back into an occupied place
@@ -140,6 +140,43 @@ fn run_steps(steps: &[UndoStep]) -> Outcome {
         }
     }
     out
+}
+
+/// Applies `steps` (background thread) and journals the result. Shared by the
+/// grid's history panel and a floating window's Ctrl+Z, which has no panel.
+pub(crate) fn apply_undo(rec: &Record, steps: &[UndoStep]) -> Outcome {
+    let out = run_steps(steps);
+    let mut items: Vec<RecordItem> = out.items.iter().chain(&out.recycled).map(|i| item_with_stat(i.src.clone(), i.dst.clone(), i.is_dir, &RealFs)).collect();
+    items.extend(out.restored.iter().map(|p| item_with_stat(p.clone(), Some(p.clone()), p.is_dir(), &RealFs)));
+    if !items.is_empty() && let Ok(mut j) = ops::journal().lock() { let _ = j.mark_undone(rec.id, rec.pane, items); }
+    out
+}
+
+/// The record Ctrl+Z would undo next, with its plan. A floating window has no
+/// history panel, so this is all it needs (background thread).
+pub(crate) enum NextUndo {
+    /// Nothing left to undo.
+    None,
+    /// The journal could not be read, or the plan has a reason.
+    Failed(String),
+    Ready(Record, Vec<UndoStep>),
+}
+
+pub(crate) fn next_undo() -> NextUndo {
+    let id = match ops::journal().lock() {
+        Ok(j) => j.last_undoable().map(|r| r.id),
+        Err(_) => return NextUndo::Failed("journal".into()),
+    };
+    let Some(id) = id else { return NextUndo::None };
+    let rec = match ops::journal().lock() {
+        Ok(j) => j.get(id).cloned(),
+        Err(_) => return NextUndo::Failed("journal".into()),
+    };
+    let Some(rec) = rec else { return NextUndo::None };
+    match plan_undo(&rec, &RealFs) {
+        Ok(steps) => NextUndo::Ready(rec, steps),
+        Err(why) => NextUndo::Failed(why.to_string()),
+    }
 }
 
 impl Workspace {
@@ -242,14 +279,7 @@ impl Workspace {
         cx.notify();
         let label = summary(&rec, en);
         cx.spawn(async move |this, cx| {
-            let (id, pane) = (rec.id, rec.pane);
-            let out = cx.background_executor().spawn(async move {
-                let out = run_steps(&steps);
-                let mut items: Vec<RecordItem> = out.items.iter().chain(&out.recycled).map(|i| item_with_stat(i.src.clone(), i.dst.clone(), i.is_dir, &RealFs)).collect();
-                items.extend(out.restored.iter().map(|p| item_with_stat(p.clone(), Some(p.clone()), p.is_dir(), &RealFs)));
-                if !items.is_empty() && let Ok(mut j) = ops::journal().lock() { let _ = j.mark_undone(id, pane, items); }
-                out
-            }).await;
+            let out = cx.background_executor().spawn(async move { apply_undo(&rec, &steps) }).await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(h) = &mut this.history { h.busy = None }
                 let a = ops::follow_moves(&out.items, cx);
