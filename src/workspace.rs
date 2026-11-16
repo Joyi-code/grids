@@ -175,6 +175,11 @@ pub struct Workspace {
     update: UpdateState,
     /// Theme packs found in `themes/` beside the settings, plus the active one.
     themes: Vec<(String, PathBuf)>,
+    /// The one floating window this grid opened; a new detach closes it first,
+    /// so a click on the detach icon never piles windows up.
+    float_win: Option<WindowHandle<crate::float::FloatPane>>,
+    /// Where that window was, so its replacement opens in the same place.
+    float_bounds: Option<Bounds<Pixels>>,
     _subs: Vec<Subscription>,
 }
 
@@ -317,6 +322,8 @@ impl Workspace {
             history: None,
             update: UpdateState::Idle,
             themes: theme_packs(cx),
+            float_win: None,
+            float_bounds: None,
             _subs: vec![],
         };
         me.panes = session.panes.iter().enumerate().map(|(i, p)| me.make_pane(i, p, window, cx)).collect();
@@ -969,13 +976,21 @@ impl Workspace {
             }
         };
         let ws = cx.entity();
+        // One floating window at a time: a new detach closes the last one and
+        // its replacement opens where it was.
+        if let Some(old) = self.float_win.take() {
+            // The platform's own bounds, not the client area: feeding a client
+            // rect back as WindowBounds would shift the window each time.
+            if let Ok(WindowBounds::Windowed(bounds)) = old.update(cx, |_, window, _| { let b = window.window_bounds(); window.remove_window(); b }) {
+                self.float_bounds = Some(bounds);
+            }
+        }
         // A floating window draws its own caption: no system title bar.
         let brand = state::brand(cx);
         let folder = save.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| save.path.display().to_string());
+        let bounds = self.float_bounds.unwrap_or_else(|| Bounds::new(point(px(480.), px(360.)), size(px(780.), px(560.))));
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                point(px(480.), px(360.)), size(px(780.), px(560.)),
-            ))),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
             app_id: Some("grids".into()),
             window_decorations: if cfg!(target_os = "linux") { Some(WindowDecorations::Client) } else { None },
             titlebar: Some(TitlebarOptions {
@@ -987,9 +1002,12 @@ impl Workspace {
             window_background: theme::window_background(),
             ..Default::default()
         };
-        let _ = cx.open_window(options, move |window, cx| {
+        let opened = cx.open_window(options, move |window, cx| {
             cx.new(|cx| crate::float::FloatPane::new(save, index, ws, window, cx))
         });
+        if let Ok(handle) = opened {
+            self.float_win = Some(handle);
+        }
     }
 
     /// A floating window's folder, sort, view and columns land back in `index`,
