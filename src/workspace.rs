@@ -1,6 +1,7 @@
 //! The window: title bar, sidebar, the grid of panes with its splitters, the
 //! layout picker and the status bar. Owns the panes and saves the session.
 
+use crate::confirm;
 use crate::input::{InputEvent, TextInput};
 use crate::ops::{self, Op};
 use crate::pane::{DraggedFiles, PaneEvent, PaneView};
@@ -462,6 +463,18 @@ impl Workspace {
         let s = cx.global_mut::<Shared>();
         s.config.current = session;
         if let Err(e) = s.config.save(&s.config_path) { log::warn!("saving settings: {e}") }
+    }
+
+    /// A floating pane changed something worth saving (sort, columns,
+    /// favourites): save the session the way the grid does.
+    pub fn note_changed(&mut self, cx: &mut Context<Self>) {
+        self.schedule_save(cx);
+    }
+
+    /// Files changed by a floating pane: panes of this grid showing those
+    /// folders reload (the floating pane has reloaded itself already).
+    pub fn files_changed(&mut self, dirs: &[PathBuf], cx: &mut Context<Self>) {
+        self.fs_changed(dirs, cx);
     }
 
     fn load_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
@@ -1148,33 +1161,18 @@ impl Workspace {
     }
 
     fn show_delete_confirm(&mut self, pane: Entity<PaneView>, paths: Vec<PathBuf>, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let en = state::en(cx);
-        let n = paths.len();
-        let name = |p: &PathBuf| p.file_name().map_or_else(|| p.to_string_lossy().into_owned(), |s| s.to_string_lossy().into_owned());
-        let one = (n == 1).then(|| name(&paths[0]));
-        let body = match (permanent, &one, en) {
-            (false, Some(f), false) => format!("将「{f}」移入回收站？"),
-            (false, None, false) => format!("将 {n} 项移入回收站？"),
-            (true, Some(f), false) => format!("永久删除「{f}」？删除后无法从回收站恢复。"),
-            (true, None, false) => format!("永久删除 {n} 项？删除后无法从回收站恢复。"),
-            (false, Some(f), true) => format!("Move “{f}” to the Recycle Bin?"),
-            (false, None, true) => format!("Move {n} items to the Recycle Bin?"),
-            (true, Some(f), true) => format!("Permanently delete “{f}”? It can't be restored from the Recycle Bin."),
-            (true, None, true) => format!("Permanently delete {n} items? They can't be restored from the Recycle Bin."),
-        };
-        let names: Vec<SharedString> = if n > 1 { paths.iter().take(5).map(|p| name(p).into()).collect() } else { vec![] };
-        let more = (n > 5).then(|| SharedString::from(if en { format!("and {} more", n - 5) } else { format!("等 {n} 项") }));
+        let text = confirm::delete_card(state::en(cx), &paths, permanent);
         self.confirm = Some(Confirm {
-            title: if permanent { tr(cx, "永久删除", "Delete permanently") } else { tr(cx, "移入回收站", "Move to Recycle Bin") }.into(),
-            body: body.into(),
-            ok: if permanent { tr(cx, "永久删除", "Delete permanently") } else { tr(cx, "删除", "Delete") }.into(),
-            names,
-            more,
+            title: text.title,
+            body: text.body,
+            ok: text.ok,
+            names: text.names,
+            more: text.more,
             action: Rc::new(move |_, _, cx| {
                 let paths = paths.clone();
                 pane.update(cx, |p, cx| p.delete_confirmed(paths, permanent, cx));
             }),
-            danger: true,
+            danger: text.danger,
             focus: 0,
         });
         self.version_pop = false;
@@ -1192,35 +1190,21 @@ impl Workspace {
     /// it cancels); the menus' surface, hairline, radius and shadow.
     fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let c = self.confirm.as_ref()?;
-        let button = |id: &'static str, label: SharedString, danger: bool, focused: bool| {
-            div().id(id).h(px(30.)).min_w(px(76.)).px(px(14.)).rounded(px(7.)).flex().items_center().justify_center().cursor_pointer()
-                .border_2().border_color(if focused { Theme::focus_ring() } else { gpui::transparent_black() })
-                .map(|d| if danger {
-                    d.bg(Theme::danger()).text_color(gpui::white()).font_weight(FontWeight::MEDIUM).hover(|s| s.bg(Theme::danger_hover()))
-                } else {
-                    d.bg(Theme::fill_hover_strong()).text_color(Theme::text()).hover(|s| s.bg(Theme::fill_pressed()))
-                })
-                .when(!danger && id == "confirm-ok", |d| d.bg(Theme::primary()).text_color(gpui::white()).font_weight(FontWeight::MEDIUM).hover(|s| s.bg(Theme::primary()).opacity(0.9)))
-                .child(label)
+        let ok_kind = if c.danger { confirm::Kind::Danger } else { confirm::Kind::Accent };
+        let text = confirm::Card {
+            title: c.title.clone(),
+            body: c.body.clone(),
+            ok: c.ok.clone(),
+            names: c.names.clone(),
+            more: c.more.clone(),
+            danger: c.danger,
         };
-        let card = div()
-            .id("confirm")
-            .w(px(360.))
-            .p(px(20.))
-            .pb(px(16.))
-            .flex()
-            .flex_col()
-            .bg(theme::raised(Theme::popover_bg()))
-            .border_1()
-            .border_color(Theme::line_border())
-            .rounded(px(8.))
-            .shadow(theme::shadow_menu())
-            .font_family(theme::UI_FONT)
-            .text_size(px(13.))
-            .text_color(Theme::text())
-            .occlude()
-            .track_focus(&self.dialog_focus)
-            .key_context("Dialog")
+        let buttons = div().flex().items_center().gap(px(8.))
+            .child(confirm::button("confirm-cancel", tr(cx, "取消", "Cancel").into(), confirm::Kind::Plain, c.focus == 0)
+                .on_click(cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx))))
+            .child(confirm::button("confirm-ok", c.ok.clone(), ok_kind, c.focus == 1)
+                .on_click(cx.listener(|this, _, window, cx| this.close_confirm(true, window, cx))));
+        let card = confirm::card(&text, buttons, &self.dialog_focus)
             .on_action(cx.listener(|this, _: &DialogCancel, window, cx| this.close_confirm(false, window, cx)))
             .on_action(cx.listener(|this, _: &DialogAccept, window, cx| {
                 let accept = this.confirm.as_ref().is_some_and(|c| c.focus == 1);
@@ -1230,33 +1214,10 @@ impl Workspace {
                 if let Some(c) = &mut this.confirm { c.focus ^= 1 }
                 cx.notify();
             }))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(c.title.clone()))
-            // plain text: it wraps (UiText is one line)
-            .child(div().mt(px(8.)).line_height(px(20.)).text_color(Theme::text_caption()).child(c.body.clone()))
-            .when(!c.names.is_empty(), |d| d.child(
-                div().mt(px(8.)).px(px(10.)).py(px(6.)).rounded(px(6.)).bg(Theme::fill_hover()).flex().flex_col()
-                    .text_size(px(12.)).line_height(px(19.)).text_color(Theme::text())
-                    .children(c.names.iter().map(|n| div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(n.clone()))))
-                    .children(c.more.clone().map(|m| div().text_color(Theme::text_caption()).child(m))),
-            ))
-            .child(
-                div().mt(px(20.)).flex().justify_end().gap(px(8.))
-                    .child(button("confirm-cancel", tr(cx, "取消", "Cancel").into(), false, c.focus == 0)
-                        .on_click(cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx))))
-                    .child(button("confirm-ok", c.ok.clone(), c.danger, c.focus == 1)
-                        .on_click(cx.listener(|this, _, window, cx| this.close_confirm(true, window, cx)))),
-            );
-        Some(
-            deferred(
-                div().id("confirm-scrim").absolute().inset_0().flex().items_center().justify_center().bg(gpui::black().opacity(0.18)).occlude()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx)))
-                    .child(card)
-                    .with_animation("confirm-fade", Animation::new(Duration::from_millis(110)), |d, t| d.opacity(t)),
-            )
-            .with_priority(5)
-            .into_any_element(),
-        )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let scrim = confirm::scrim(card)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_confirm(false, window, cx)));
+        Some(confirm::fade(scrim))
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

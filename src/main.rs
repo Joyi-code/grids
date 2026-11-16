@@ -3,6 +3,7 @@
 
 mod app_icon;
 mod assets;
+mod confirm;
 mod float;
 mod input;
 mod menu;
