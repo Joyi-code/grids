@@ -36,7 +36,7 @@ b569a30 app: closing the window hides it in the notification area
 - **目录树搜索（0.9.11 新增）**：Ctrl+F 递归搜索当前窗格目录，空格分词，中文按两字拆词，类型列显示命中的子目录。
 - **浮窗（0.9.11 新增，标题栏已图标化）**：每个窗格标题栏有外链图标，弹出独立窗口；浮窗里的窗格在原来的链接图标位置显示图钉（置顶）和恢复图标，没有独立顶栏，也没有透明度；窗口用自绘标题栏（文件夹名 + 窗口按钮），不显示系统标题栏。
 - **关闭即隐藏（0.9.12 新增）**：主窗口点关闭不退出，收进右下角通知区；托盘图标单击恢复窗口，右键菜单「显示主窗口」「退出」，退出前先保存会话。浮窗点关闭仍然只关那一个窗口。Windows 专属；其他平台或托盘创建失败时保持关闭即退出。
-- **拖到外部程序（未发版）**：按住文件拖出窗口后改用系统的 OLE 拖放（`grids_shell::drag_files`，数据对象是 shell 的 IShellItemArray → IDataObject），可以拖进微信、桌面、资源管理器等。只做复制（`DROPEFFECT_COPY`），不移动、不删除源文件。窗口内的拖动仍走内部逻辑（同盘移动、拖进文件夹、只读文件夹只复制）。
+- **拖到外部程序（未发版）**：按住文件拖出窗口后改用系统的 OLE 拖放（`grids_shell::drag_files`，数据对象是 shell 的 IShellItemArray → IDataObject），可以拖进微信、桌面、资源管理器等。只做复制（`DROPEFFECT_COPY`），不移动、不删除源文件。窗口内的拖动仍走内部逻辑（同盘移动、拖进文件夹、只读文件夹只复制）。主窗口和浮窗都适用；浮窗拖出去时会经过主窗口，2026-11-16 修掉了那条路径上的崩溃（见第 8 节）。
 - **滚动条（未发版）**：文件列表右侧有细滚动条，内容超出时才出现；拖滑块定位、点轨道跳转（Explorer 式），滚轮滚动时滑块跟着走。实现见 `src/pane.rs` 的 `Sbar` / `sbar_*`，用 `ScrollHandle::set_offset` 直接写滚动位置。
 
 ## 4. 发布政策（重要）
@@ -104,3 +104,4 @@ gh api -X PATCH repos/Joyi-code/grids/releases/$id -F draft=true   # 必须是 -
 - 主题解包曾因「写出 theme.json 后跳过剩余文件」导致 `types\` 为空，已修，且现在只补缺失文件。
 - 重写提交前先确认 `git branch --show-current`，曾多次误提交到 main。
 - 单测：`crates/core/src/search.rs` 5 个、`src/update.rs` 1 个。
+- **GPUI 里读 CF_HDROP 的 bug（2026-11-16，已修在 vendor）**：`WindowsDragDropHandler::DragEnter` 把 `hGlobal.0` 当指针解引用再去 `DragQueryFileW`，只有资源管理器那种 moveable 全局内存的布局才碰巧成立；shell 数据对象给的是 fixed 块，于是读到野指针，崩在 `windows.storage.dll`（0xc0000005）。现改成 `GlobalLock` 后把锁住的块当 HDROP 用，并在每条出口 `ReleaseStgMedium`。现象是「从浮窗往桌面拖就卡死/崩溃」，拖过任何 Grids 自己窗口都会触发。
