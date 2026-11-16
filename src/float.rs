@@ -52,6 +52,8 @@ impl FloatPane {
         let pinned = Rc::new(Cell::new(false));
         let pane = cx.new(|cx| {
             let mut pane = PaneView::new(index, &save, window, cx);
+            // The only pane of its window: selected rows take the active look.
+            pane.active = true;
             pane.set_float(FloatCtl { pinned, workspace: workspace.clone(), index });
             pane
         });
@@ -108,10 +110,46 @@ impl FloatPane {
                 pane.update(cx, |p, cx| p.refresh_if_showing(dirs, cx));
                 self.workspace.update(cx, |ws, cx| ws.files_changed(dirs, cx));
             }
-            // The grid's features have no meaning in one pane: link groups,
-            // Today, the next pane, maximising, the note editor.
+            // Every move asks who holds the files first. The grid shows its
+            // dialog; here the check runs quietly and the move goes ahead, the
+            // shell reporting a file that is really stuck.
+            PaneEvent::Lockers { paths, then } => self.lockers(paths.clone(), then.clone(), window, cx),
+            // The rest belongs to the grid: link groups, Today, the next pane,
+            // maximising.
             _ => {}
         }
+    }
+
+    /// `then` Some: a move waits for this check. None: the menu's 查看占用,
+    /// answered here with a line instead of the grid's list dialog.
+    fn lockers(&mut self, paths: Vec<PathBuf>, then: Option<crate::workspace::LockersThen>, window: &mut Window, cx: &mut Context<Self>) {
+        let en = state::en(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let probe = paths.clone();
+            let found = cx.background_executor().spawn(async move {
+                grids_shell::lockers(&probe).map(|l| l.list.into_iter().map(|w| w.name).collect::<Vec<_>>()).unwrap_or_default()
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| match then {
+                Some(then) => {
+                    if !found.is_empty() {
+                        let msg = if en { format!("In use by {}: trying anyway", found.join(", ")) } else { format!("被占用（{}），仍然继续", found.join("、")) };
+                        this.say(msg, cx);
+                    }
+                    // `then` updates the pane; run it after this update ends.
+                    window.defer(cx, move |window, cx| then(window, cx));
+                }
+                None => {
+                    let msg = if found.is_empty() {
+                        if en { "Nothing holds these files".to_string() } else { "没有程序占用这些文件".to_string() }
+                    } else if en {
+                        format!("In use by {}", found.join(", "))
+                    } else {
+                        format!("被占用：{}", found.join("、"))
+                    };
+                    this.say(msg, cx);
+                }
+            });
+        }).detach();
     }
 
     fn say(&mut self, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
