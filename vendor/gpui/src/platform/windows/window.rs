@@ -20,7 +20,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::{Com::*, LibraryLoader::*, Ole::*, SystemServices::*},
+        System::{Com::*, LibraryLoader::*, Memory::{GlobalLock, GlobalUnlock}, Ole::*, SystemServices::*},
         UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -900,16 +900,23 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
                     return Ok(());
                 };
-                if idata.u.hGlobal.is_invalid() {
-                    return Ok(());
-                }
-                let hdrop = idata.u.hGlobal.0 as *mut HDROP;
+                // CF_HDROP: the medium holds a DROPFILES block; a moveable
+                // HGLOBAL has to be locked before DragQueryFileW may read it.
+                // Grids' shell data object hands out a fixed block, where
+                // reading the handle as a pointer crashed in windows.storage.
+                let hglobal = idata.u.hGlobal;
                 let mut paths = SmallVec::<[PathBuf; 2]>::new();
-                with_file_names(*hdrop, |file_name| {
-                    if let Some(path) = PathBuf::from_str(&file_name).log_err() {
-                        paths.push(path);
+                if !hglobal.is_invalid() {
+                    let hdrop = GlobalLock(hglobal);
+                    if !hdrop.is_null() {
+                        with_file_names(HDROP(hdrop), |file_name| {
+                            if let Some(path) = PathBuf::from_str(&file_name).log_err() {
+                                paths.push(path);
+                            }
+                        });
+                        let _ = GlobalUnlock(hglobal);
                     }
-                });
+                }
                 ReleaseStgMedium(&mut idata);
                 let mut cursor_position = cursor_position;
                 ScreenToClient(self.0.hwnd, &mut cursor_position)
