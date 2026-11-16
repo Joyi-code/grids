@@ -615,6 +615,10 @@ pub fn open_with(_path: &Path, _handler_id: &str) -> io::Result<()> {
     Err(unsupported("open with"))
 }
 
+pub fn drag_files(_paths: &[PathBuf]) -> io::Result<bool> {
+    Ok(false)
+}
+
 pub fn open_with_dialog(_hwnd: isize, _path: &Path) -> io::Result<()> {
     Err(unsupported("choose another app"))
 }

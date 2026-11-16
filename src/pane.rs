@@ -312,6 +312,9 @@ pub struct PaneView {
     pub link: Option<LinkView>,
     /// Panes in the grid, for the title menu.
     pub pane_count: usize,
+    /// The shell's own drag has taken over this drag (files leaving the
+    /// window), so the internal one must not start again.
+    drag_out: bool,
     /// Some: this pane fills a floating window and draws the window's own
     /// pin and restore icons in its header.
     pub float: Option<FloatCtl>,
@@ -368,6 +371,7 @@ impl PaneView {
             press_row: None,
             link: None,
             pane_count: 1,
+            drag_out: false,
             float: None,
         };
         me.load(None, cx);
@@ -1063,6 +1067,46 @@ impl PaneView {
         let list: Vec<PathBuf> = paths.paths().iter().filter(|p| p.parent() != Some(dest.as_path())).cloned().collect();
         let names = list.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         self.run_op(Op::Copy, list, Some(dest), names, cx);
+    }
+
+    // ---- dragging files out to other programs
+
+    /// Watches the pointer during a drag: once it leaves the window the shell
+    /// takes over (`grids_shell::drag_files`), so a chat window, the desktop
+    /// or Explorer gets the files as a normal drop. Inside the window the
+    /// internal drag keeps working (move between panes, drop into a folder).
+    fn drag_out_track(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        canvas(|_, _, _| {}, move |_, _, window, _| {
+            let weak = weak.clone();
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture { return }
+                let _ = weak.update(cx, |this, cx| this.drag_out_to(ev.position, window, cx));
+            });
+        }).absolute().size_full()
+    }
+
+    fn drag_out_to(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_out || self.press_row.is_none() || !cx.has_active_drag() { return }
+        // A read-only folder never hands its files to another program.
+        if state::locked_root(cx, &self.state.path).is_some() { return }
+        let view = window.viewport_size();
+        if at.x >= px(0.) && at.y >= px(0.) && at.x <= view.width && at.y <= view.height { return }
+        let paths = self.state.selected_paths();
+        if paths.is_empty() { return }
+        // The shell's drag owns the mouse from here: end the internal one and
+        // let OLE run its loop outside any app borrow.
+        self.drag_out = true;
+        self.press_row = None;
+        cx.stop_active_drag(window);
+        cx.spawn_in(window, async move |this, cx| {
+            let taken = grids_shell::drag_files(&paths).unwrap_or(false);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.drag_out = false;
+                if taken { window.refresh() }
+                cx.notify();
+            });
+        }).detach();
     }
 
     // ---- rubber-band selection
@@ -1894,6 +1938,7 @@ impl PaneView {
                 // Touching the pane accepts the changes counted so far.
                 this.ack_changes();
                 this.press_row = Some(r);
+                this.drag_out = false;
                 window.focus(&this.focus);
                 let m = ev.modifiers;
                 if ev.click_count >= 2 && !m.control && !m.shift { return this.open_row(r, cx) }
@@ -2174,6 +2219,7 @@ impl Render for PaneView {
             }, |_, _, _, _| {}).absolute().size_full())
             .child(self.ctrl_wheel(cx))
             .child(self.marquee_track(cx))
+            .child(self.drag_out_track(cx))
             .child(list)
             .children(marquee_box)
             .children(lock_veil)

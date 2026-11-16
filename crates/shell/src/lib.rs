@@ -808,6 +808,19 @@ pub fn clipboard_get_files() -> Option<(Vec<PathBuf>, bool)> {
     imp::clipboard_get_files()
 }
 
+/// Drags `paths` out of the app with the shell's own drag and drop (OLE on
+/// Windows), so another program — a chat window, the desktop — takes them as
+/// a normal drop. Blocks the calling (UI) thread in OLE's loop until the drop
+/// or cancel: call it from a foreground task outside any app borrow, as with
+/// [`context_menu`]. Copy only; never moves or deletes anything. `true` when
+/// a target accepted the drop. Always `false` off Windows (drags stay in app).
+pub fn drag_files(paths: &[PathBuf]) -> io::Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    imp::drag_files(paths)
+}
+
 /// True when both paths are on the same volume (drag = move, else copy).
 pub fn same_volume(a: &Path, b: &Path) -> bool {
     imp::same_volume(a, b)

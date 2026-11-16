@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA,
-    ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE, HGLOBAL, HWND,
-    LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, S_OK, SIZE, WIN32_ERROR, WPARAM,
+    CloseHandle, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS,
+    ERROR_ACCESS_DENIED, ERROR_CANCELLED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA,
+    ERROR_NO_ASSOCIATION, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GlobalFree, HANDLE, HGLOBAL,
+    HWND, LPARAM, LRESULT, POINT, RPC_E_CHANGED_MODE, S_OK, SIZE, WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
@@ -43,7 +44,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
+use windows::Win32::System::Ole::{
+    CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    DoDragDrop, IDropSource, IDropSource_Impl,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CLASSES_ROOT, KEY_READ, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE, RRF_NOEXPAND,
     RRF_RT_ANY, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
@@ -52,6 +56,7 @@ use windows::Win32::System::RestartManager::{
     CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
     RmStartSession,
 };
+use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     QueryFullProcessImageNameW, TerminateProcess,
@@ -1881,6 +1886,45 @@ pub fn open_with_handlers(path: &Path) -> Vec<crate::Handler> {
 fn data_object(paths: &[PathBuf]) -> io::Result<IDataObject> {
     let arr = items(paths)?;
     unsafe { arr.BindToHandler(None, &BHID_DataObject) }.map_err(win_err)
+}
+
+/// The drag source OLE asks while a drag runs: Esc cancels, releasing the
+/// button drops. Copy only, so the target copies and our files stay.
+#[implement(IDropSource)]
+struct DragSource;
+
+#[allow(non_snake_case)]
+impl IDropSource_Impl for DragSource_Impl {
+    fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
+        if escape.as_bool() {
+            DRAGDROP_S_CANCEL
+        } else if !keys.contains(MK_LBUTTON) {
+            DRAGDROP_S_DROP
+        } else {
+            S_OK
+        }
+    }
+    fn GiveFeedback(&self, _: DROPEFFECT) -> HRESULT {
+        DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+/// Hands `paths` to whatever is under the mouse with the shell's own drag and
+/// drop (OLE: `DoDragDrop`), the way Explorer does, so a chat window, the
+/// desktop or another file manager takes them as a normal drop. The calling
+/// thread runs OLE's modal loop until the drop or cancel: call it from a
+/// foreground task outside any app borrow, as with [`context_menu`]. Copy
+/// only. `true` when a target accepted the drop.
+pub fn drag_files(paths: &[PathBuf]) -> io::Result<bool> {
+    ensure_com();
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let data = data_object(paths)?;
+    let source: IDropSource = DragSource.into();
+    let mut effect = DROPEFFECT_NONE;
+    let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+    Ok(hr == DRAGDROP_S_DROP && effect != DROPEFFECT_NONE)
 }
 
 pub fn open_with(path: &Path, handler_id: &str) -> io::Result<()> {
