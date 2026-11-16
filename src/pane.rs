@@ -114,6 +114,11 @@ const FRESH: Duration = Duration::from_secs(4);
 const FRESH_HOLD: Duration = Duration::from_secs(2);
 /// More changes than this at once are only counted, not highlighted.
 const FRESH_MAX: usize = 500;
+/// The scrollbar: clickable width, side insets, thumb width and least height.
+const SBAR_W: f32 = 12.;
+const SBAR_INSET: f32 = 4.;
+const SBAR_THUMB_W: f32 = 6.;
+const SBAR_MIN: f32 = 28.;
 
 /// What the workspace hears from a pane.
 pub enum PaneEvent {
@@ -243,6 +248,29 @@ struct Marquee {
     base: Vec<usize>,
 }
 
+/// Where the scrollbar's thumb sits, worked out from the list's scroll state.
+#[derive(Clone, Copy)]
+struct Sbar {
+    /// Height of the track.
+    track_h: f32,
+    /// Height of the thumb.
+    thumb_h: f32,
+    /// How far the list can scroll (content minus viewport).
+    max_scroll: f32,
+    /// Distance from the track's top to the thumb's top.
+    top: f32,
+}
+
+impl Sbar {
+    /// The distance between the thumb's top and the track's top is what moves;
+    /// the rest of the track maps to the scrollable content.
+    fn travel(&self) -> f32 { (self.track_h - self.thumb_h).max(1.) }
+
+    fn top_at(&self, offset: f32) -> f32 { (offset / self.max_scroll).clamp(0., 1.) * self.travel() }
+
+    fn offset_at(&self, top: f32) -> f32 { (top / self.travel()).clamp(0., 1.) * self.max_scroll }
+}
+
 /// What a floating window's pane needs to draw its own chrome: the pin and
 /// the restore icon sit in the header instead of a bar of their own.
 pub struct FloatCtl {
@@ -315,6 +343,10 @@ pub struct PaneView {
     /// The shell's own drag has taken over this drag (files leaving the
     /// window), so the internal one must not start again.
     drag_out: bool,
+    /// The scrollbar's track (window coordinates), to read a drag position.
+    sbar_box: Rc<Cell<Bounds<Pixels>>>,
+    /// A thumb drag is running; the value is the grab point inside the thumb.
+    sbar_drag: Option<f32>,
     /// Some: this pane fills a floating window and draws the window's own
     /// pin and restore icons in its header.
     pub float: Option<FloatCtl>,
@@ -372,6 +404,8 @@ impl PaneView {
             link: None,
             pane_count: 1,
             drag_out: false,
+            sbar_box: Rc::default(),
+            sbar_drag: None,
             float: None,
         };
         me.load(None, cx);
@@ -1107,6 +1141,97 @@ impl PaneView {
                 cx.notify();
             });
         }).detach();
+    }
+
+    // ---- the scrollbar: drag the thumb to jump through a long folder
+
+    /// The thumb's size and place, from the list's measured content and its
+    /// current offset. `None` when everything fits.
+    fn sbar_geom(&self) -> Option<Sbar> {
+        let (viewport, content) = {
+            let state = self.scroll.0.borrow();
+            let size = state.last_item_size?;
+            (f32::from(size.item.height), f32::from(size.contents.height))
+        };
+        let max_scroll = content - viewport;
+        if viewport <= 0. || max_scroll <= 1. { return None }
+        // The track's own bounds from last frame; the first frame falls back to
+        // the body's height (the track is inset by SBAR_INSET top and bottom).
+        let track = self.sbar_box.get();
+        let track_h = if track.size.height > px(0.) { f32::from(track.size.height) } else { f32::from(self.list_bounds.get().size.height) - 2. * SBAR_INSET };
+        if track_h <= 0. { return None }
+        let thumb_h = (viewport / content * track_h).clamp(SBAR_MIN.min(track_h), track_h);
+        let offset = (-f32::from(self.scroll.0.borrow().base_handle.offset().y)).clamp(0., max_scroll);
+        let bare = Sbar { track_h, thumb_h, max_scroll, top: 0. };
+        Some(Sbar { top: bare.top_at(offset), ..bare })
+    }
+
+    fn sbar_element(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let sbar = self.sbar_geom()?;
+        let bounds = self.sbar_box.clone();
+        let dragging = self.sbar_drag.is_some();
+        Some(
+            div().id("sbar").absolute().right(px(1.)).top(px(SBAR_INSET)).bottom(px(SBAR_INSET)).w(px(SBAR_W))
+                .child(canvas(move |b, window, _| {
+                    let old = bounds.replace(b);
+                    if (old.size.height - b.size.height).abs() > px(0.5) { window.request_animation_frame() }
+                }, |_, _, _, _| {}).absolute().size_full())
+                .child(
+                    div().absolute().right(px(3.)).top(px(sbar.top)).w(px(SBAR_THUMB_W)).h(px(sbar.thumb_h)).rounded(px(3.))
+                        .when(dragging, |d| d.bg(Theme::primary()))
+                        .when(!dragging, |d| d.bg(Theme::text_placeholder()).hover(|h| h.bg(Theme::primary()))),
+                )
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, _, cx| { cx.stop_propagation(); this.sbar_press(ev.position, cx) }))
+        )
+    }
+
+    /// A press on the track: grab the thumb, or jump to where the press landed.
+    fn sbar_press(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(sbar) = self.sbar_geom() else { return };
+        let track = self.sbar_box.get();
+        let y = f32::from(at.y) - f32::from(track.origin.y);
+        let on_thumb = y >= sbar.top && y <= sbar.top + sbar.thumb_h;
+        self.sbar_drag = Some(if on_thumb { y - sbar.top } else { sbar.thumb_h / 2. });
+        if !on_thumb { self.sbar_to(y - sbar.thumb_h / 2., cx) }
+        cx.notify();
+    }
+
+    /// Puts the thumb's top at `top` and scrolls the list to match.
+    fn sbar_to(&mut self, top: f32, cx: &mut Context<Self>) {
+        let Some(sbar) = self.sbar_geom() else { return };
+        let offset = sbar.offset_at(top);
+        self.scroll.0.borrow().base_handle.set_offset(point(px(0.), px(-offset)));
+        cx.notify();
+    }
+
+    fn sbar_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(grab) = self.sbar_drag else { return };
+        let track = self.sbar_box.get();
+        let y = f32::from(at.y) - f32::from(track.origin.y);
+        self.sbar_to(y - grab, cx);
+    }
+
+    /// Keeps the thumb in step: follows the drag anywhere in the window, and
+    /// redraws after the wheel so the thumb moves with the list.
+    fn sbar_watch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        canvas(|_, _, _| {}, move |_, _, window, _| {
+            let w = weak.clone();
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture { return }
+                let _ = w.update(cx, |this, cx| this.sbar_move(ev.position, cx));
+            });
+            let w = weak.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture { return }
+                let _ = w.update(cx, |this, cx| if this.sbar_drag.take().is_some() { cx.notify() });
+            });
+            let w = weak.clone();
+            window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture { return }
+                let _ = w.update(cx, |this, cx| if this.list_bounds.get().contains(&ev.position) { cx.notify() });
+            });
+        }).absolute().size_full()
     }
 
     // ---- rubber-band selection
@@ -2220,11 +2345,13 @@ impl Render for PaneView {
             .child(self.ctrl_wheel(cx))
             .child(self.marquee_track(cx))
             .child(self.drag_out_track(cx))
+            .child(self.sbar_watch(cx))
             .child(list)
             .children(marquee_box)
             .children(lock_veil)
             .children(empty)
             .children(missing)
+            .children(self.sbar_element(cx))
             .drag_over::<DraggedFiles>(|s, _, _, _| s.bg(Theme::drop_target()))
             .drag_over::<ExternalPaths>(|s, _, _, _| s.bg(Theme::drop_target()))
             .on_drop(cx.listener(|this, d: &DraggedFiles, window, cx| this.drop_files(d, None, window, cx)))
