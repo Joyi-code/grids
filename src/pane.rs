@@ -1133,8 +1133,11 @@ impl PaneView {
         self.drag_out = true;
         self.press_row = None;
         cx.stop_active_drag(window);
+        log::info!("drag-out: start ({} paths)", paths.len());
         cx.spawn_in(window, async move |this, cx| {
+            let t = std::time::Instant::now();
             let taken = grids_shell::drag_files(&paths).unwrap_or(false);
+            log::info!("drag-out: OLE returned {taken} after {:?}", t.elapsed());
             let _ = this.update_in(cx, |this, window, cx| {
                 this.drag_out = false;
                 if taken { window.refresh() }
