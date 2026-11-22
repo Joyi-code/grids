@@ -19,6 +19,33 @@ fn swap(new: &Path, target: &Path) -> i32 {
     0
 }
 
+/// `--relaunch-after <pid>`: a theme pack switch needs a fresh start (the
+/// icons are chosen at start-up). This helper waits for the instance that
+/// asked to exit — it holds the single-instance name until then — and starts
+/// the app again. True when this process was the helper.
+pub fn relaunch_after_arg() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(i) = args.iter().position(|a| a == "--relaunch-after") else { return false };
+    let Some(pid) = args.get(i + 1).and_then(|p| p.parse::<u32>().ok()) else { return true };
+    grids_shell::instance::wait_for_exit(pid);
+    if let Ok(exe) = std::env::current_exe() {
+        // The selected theme comes from the settings, never from the variable.
+        let _ = std::process::Command::new(exe).env_remove("GRIDS_THEME").spawn();
+    }
+    true
+}
+
+/// Starts a helper copy of this exe that runs `--relaunch-after <pid>`, so the
+/// app comes back on its own once this process is gone.
+pub fn start_relaunch(pid: u32) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    std::process::Command::new(exe)
+        .arg("--relaunch-after")
+        .arg(pid.to_string())
+        .spawn()
+        .is_ok()
+}
+
 /// Replaces only `target`: the settings, the journal and the theme folders
 /// beside it are never opened, renamed or deleted. The previous exe stays as
 /// `<target>.old.exe` until the next start clears it. False leaves the disk as

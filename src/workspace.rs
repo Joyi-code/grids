@@ -898,13 +898,16 @@ impl Workspace {
         self.schedule_save(cx);
     }
 
-    /// Switches the theme pack and restarts: the icons are chosen at start-up.
+    /// Switches the theme pack and restarts the app: the icons are picked at
+    /// start-up. A helper starts the new copy as soon as this process is gone,
+    /// so the switch never leaves the program closed.
     fn apply_theme_pack(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
         if state::shared(cx).config.theme == path { return }
         cx.global_mut::<Shared>().config.theme = path;
         self.save_now(cx);
-        if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new(exe).env_remove("GRIDS_THEME").spawn();
+        if !crate::update::start_relaunch(std::process::id()) {
+            self.show_toast(tr(cx, "无法自动重启，请手动打开一次", "Could not restart automatically; open the app once").into(), cx);
+            return;
         }
         cx.quit();
     }

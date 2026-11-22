@@ -26,6 +26,9 @@ use std::path::Path;
 fn main() {
     // A copy of this exe swaps in a downloaded update once the window is gone.
     if let Some(code) = update::apply_from_args() { std::process::exit(code) }
+    // The same idea for a theme pack switch: a helper waits for this process
+    // to exit, then opens the app again with the new theme.
+    if update::relaunch_after_arg() { return }
     // One Grids at a time: a second launch asks the running one to come
     // forward (it may be hidden in the notification area), then ends, so the
     // taskbar never grows a second button for the same program.

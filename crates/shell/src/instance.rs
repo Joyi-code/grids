@@ -27,6 +27,29 @@ pub fn claim() -> bool {
     true
 }
 
+/// Waits until process `pid` has exited. The theme relaunch helper uses this:
+/// the new copy starts only once the old one has let go of the single-instance
+/// name and the config file.
+#[cfg(windows)]
+pub fn wait_for_exit(pid: u32) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    // SAFETY: a handle to another process, waited on and closed; failures are
+    // ignored (the caller only wants to know "the old one is gone").
+    unsafe {
+        if let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(process, INFINITE);
+            let _ = CloseHandle(process);
+        }
+    }
+}
+
+/// Nothing to wait for elsewhere.
+#[cfg(not(windows))]
+pub fn wait_for_exit(_pid: u32) {}
+
 /// The window message a second launch posts to the running instance.
 #[cfg(windows)]
 const INSTANCE_MSG: u32 = WM_APP + 2;
