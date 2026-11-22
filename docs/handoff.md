@@ -11,8 +11,8 @@
 
 ## 2. 代码状态
 
-- 已发布版本 **v0.9.14**（tag `v0.9.14`）：资产 `grids-0.9.14.exe`，9,753,600 字节，SHA256 `108DE4BDC6D99980DD37DDB4AE25B78631B767F70CDA351A6AE33E2AA268AD73`。代码内容 = `4b3dad0`（单实例、单浮窗）+ `Version 0.9.14` 版本号提交。
-- 上一版 `v0.9.13`、`v0.9.12`、`v0.9.11`、`v0.9.10` 已按政策转成草稿；公开的只有 v0.9.14。
+- 已发布版本 **v0.9.15**（tag `v0.9.15`）：资产 `grids-0.9.15.exe`，9,756,672 字节，SHA256 `A0718B398018BA9721C375A0A66D5D343D7AF44B570A551963219D3DA592D879`。代码内容 = `aa0ac97`（切主题自动重开）+ `Version 0.9.15` 版本号提交。
+- 上一版 `v0.9.14`、`v0.9.13`、`v0.9.12`、`v0.9.11`、`v0.9.10` 已按政策转成草稿；公开的只有 v0.9.15。
 - 本地 `main` 与 `origin/main` 同步，工作区干净。
 - 最近提交：
 
@@ -38,7 +38,7 @@ b569a30 app: closing the window hides it in the notification area
 - **关闭即隐藏（0.9.12 新增）**：主窗口点关闭不退出，收进右下角通知区；托盘图标单击恢复窗口，右键菜单「显示主窗口」「退出」，退出前先保存会话。浮窗点关闭仍然只关那一个窗口。Windows 专属；其他平台或托盘创建失败时保持关闭即退出。
 - **拖到外部程序（0.9.13 新增）**：按住文件拖出窗口后改用系统的 OLE 拖放（`grids_shell::drag_files`，数据对象是 shell 的 IShellItemArray → IDataObject），可以拖进聊天软件、桌面、资源管理器等。只做复制（`DROPEFFECT_COPY`），不移动、不删除源文件。窗口内的拖动仍走内部逻辑（同盘移动、拖进文件夹、只读文件夹只复制）。主窗口和浮窗都适用；浮窗拖出去时会经过主窗口，2026-11-16 修掉了那条路径上的崩溃（见第 8 节）。
 - **浮窗补齐单格功能（0.9.13 新增）**：浮窗现在自己应答窗格事件——删除走和宫格同一张确认卡（`src/confirm.rs`，浮窗内居中显示），删除后刷新本格并让宫格其它格跟着刷新，提示信息显示在浮窗底部，排序/列宽/收藏等改动交回 `Workspace::note_changed` 保存。**移动**（拖进文件夹、剪切粘贴）也补齐了：移动前要过占用检查（`PaneEvent::Lockers`），浮窗后台跑 `grids_shell::lockers` 后直接继续，被占用时先给一条提示；菜单里的「查看占用」在浮窗改成用提示条报占用者。**撤销（Ctrl+Z）**：浮窗根元素挂 `Float` 键位上下文，直接调用 `history::next_undo` / `history::apply_undo`（这两个从宫格的历史面板抽出来共用），危险情形先弹同一张确认卡。**文件夹备注**：`src/note_card.rs` 是宫格与浮窗共用的备注卡，浮窗保存后通过 `Workspace::note_saved` 存盘并刷新两边的备注行。浮窗窗格的 `active = true`，选中行配色和宫格一致。宫格专属的东西在单格浮窗里刻意不做：联动与对比、今日、命令面板、会话、布局、在下一格打开（菜单项在浮窗里隐藏）。
-- **切换主题自动重开（未发版）**：主题包换配色也换图（图标在启动时选定，SVG 会进每个窗口的 sprite 图集），所以切换仍然要重启；`apply_theme_pack` 先写配置，再启动一个 `--relaunch-after <pid>` 助手（`src/update.rs`），助手用 `grids_shell::instance::wait_for_exit` 等旧进程退出（单实例名随之释放）后重新打开程序。直接 spawn 新进程会被单实例挡住：新进程看到互斥量就把「显示」消息发给将死的旧窗口然后自己退出，表现就是程序被关掉、必须手动重开（0.9.14 的回归）。助手起不来时给一条提示并保持窗口。
+- **切换主题自动重开（0.9.15 新增）**：主题包换配色也换图（图标在启动时选定，SVG 会进每个窗口的 sprite 图集），所以切换仍然要重启；`apply_theme_pack` 先写配置，再启动一个 `--relaunch-after <pid>` 助手（`src/update.rs`），助手用 `grids_shell::instance::wait_for_exit` 等旧进程退出（单实例名随之释放）后重新打开程序。直接 spawn 新进程会被单实例挡住：新进程看到互斥量就把「显示」消息发给将死的旧窗口然后自己退出，表现就是程序被关掉、必须手动重开（0.9.14 的回归）。助手起不来时给一条提示并保持窗口。
 - **只开一个实例（0.9.14 新增）**：`crates/shell/src/instance.rs` 用命名互斥量 `Grids.SingleInstance.v1` 保证单实例。第二次启动会找正在运行实例的隐藏窗口（类名 `GridsInstanceWindow`）并发 `WM_APP+2`，让它的窗口显示并置前（最小化会还原，收在托盘也能叫回来），自己随即退出；任务栏因此只有一条。启动顺序：`update::apply_from_args` 之后、打开窗口之前 `instance::claim()`；窗口建好后 `instance::watch(..)`，事件走和托盘同一条通道。
 - **滚动条（0.9.13 新增）**：文件列表右侧有细滚动条，内容超出时才出现；拖滑块定位、点轨道跳转（Explorer 式），滚轮滚动时滑块跟着走。实现见 `src/pane.rs` 的 `Sbar` / `sbar_*`，用 `ScrollHandle::set_offset` 直接写滚动位置。
 
@@ -121,6 +121,7 @@ $env:GPUI_FXC_PATH = "$bin\fxc.exe"
 - 重写提交前先确认 `git branch --show-current`，曾多次误提交到 main。
 - 单测：`crates/core/src/search.rs` 5 个、`src/update.rs` 1 个。
 - **GPUI 里读 CF_HDROP 的 bug（2026-11-16，已修在 vendor）**：`WindowsDragDropHandler::DragEnter` 把 `hGlobal.0` 当指针解引用再去 `DragQueryFileW`，只有资源管理器那种 moveable 全局内存的布局才碰巧成立；shell 数据对象给的是 fixed 块，于是读到野指针，崩在 `windows.storage.dll`（0xc0000005）。现改成 `GlobalLock` 后把锁住的块当 HDROP 用，并在每条出口 `ReleaseStgMedium`。现象是「从浮窗往桌面拖就卡死/崩溃」，拖过任何 Grids 自己窗口都会触发。
+
 
 
 

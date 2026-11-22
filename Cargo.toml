@@ -1,6 +1,6 @@
 [package]
 name = "grids"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2024"
 description = "Fast multi-pane file manager, drawn with GPUI"
 license = "MIT"
