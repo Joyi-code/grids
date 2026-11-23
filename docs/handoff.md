@@ -101,7 +101,7 @@ gh api -X PATCH repos/Joyi-code/grids/releases/$id -F draft=true   # 必须是 -
 cargo build --release
 ```
 
-脚本里 `$vc = D:\codex\VSBuildTools\VC\Tools\MSVC\14.44.35207`，SDK 是 `10.0.28000.0`。C 盘 `Windows Kits\10` 只剩之前误装进去的 `Debuggers`（约 328 MB），删除需要管理员。
+脚本里 `$vc = D:\codex\VSBuildTools\VC\Tools\MSVC\14.44.35207`，SDK 是 `10.0.28000.0`。C 盘 `Windows Kits\10` 的残留（`Debuggers`，约 328 MB）已删除，之前 winget 装出来的 33 个 Windows SDK 卸载项也已清掉（只剩「Windows SDK AddOn」这一条无关项）。
 - 测试：`cargo test --release -p grids_core`，`-p grids`。
 - 构建前先关掉正在运行的实例（进程名形如 `grids-0.9.11`，`Get-Process grids` 匹配不到）。
 - 测试数据：`D:\mock\grids\`，配置 `D:\mock\config\{a,b-dark,c-locked,d-compare}.json`。
@@ -116,6 +116,7 @@ cargo build --release
 - 重写提交前先确认 `git branch --show-current`，曾多次误提交到 main。
 - 单测：`crates/core/src/search.rs` 5 个、`src/update.rs` 1 个。
 - **GPUI 里读 CF_HDROP 的 bug（2026-11-16，已修在 vendor）**：`WindowsDragDropHandler::DragEnter` 把 `hGlobal.0` 当指针解引用再去 `DragQueryFileW`，只有资源管理器那种 moveable 全局内存的布局才碰巧成立；shell 数据对象给的是 fixed 块，于是读到野指针，崩在 `windows.storage.dll`（0xc0000005）。现改成 `GlobalLock` 后把锁住的块当 HDROP 用，并在每条出口 `ReleaseStgMedium`。现象是「从浮窗往桌面拖就卡死/崩溃」，拖过任何 Grids 自己窗口都会触发。
+
 
 
 
