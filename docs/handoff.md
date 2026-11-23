@@ -94,19 +94,14 @@ gh api -X PATCH repos/Joyi-code/grids/releases/$id -F draft=true   # 必须是 -
 ## 7. 本机环境
 
 - 工具链：`$env:PATH="D:\codex\.cargo\bin;$env:PATH"`，然后 `cargo build --release`。
-- **2026-11-22：本机 Windows SDK 不见了**。注册表 `KitsRoot10` 仍指向 `C:\Program Files (x86)\Windows Kits\10\`，但目录已删除；`D:\codex\VSBuildTools` 只剩 VC 工具。缺 `kernel32.lib` 时连 hello world 都链接不了。当前用 NuGet 版 SDK 顶着（不需要管理员），包在 `D:\tmp\sdk\nuget`：`Microsoft.Windows.SDK.BuildTools` / `Microsoft.Windows.SDK.CPP` / `Microsoft.Windows.SDK.CPP.x64`。构建前设置：
+- **2026-11-22：本机 Windows SDK 不见了**。注册表 `KitsRoot10` 仍指向 `C:\Program Files (x86)\Windows Kits\10\`，但目录已删除；`D:\codex\VSBuildTools` 只剩 VC 工具。缺 `kernel32.lib` 时连 hello world 都链接不了。现在用 NuGet 版 SDK 顶着（不需要管理员、不占 C 盘），放在 `D:\codex\winsdk\nuget`：`Microsoft.Windows.SDK.BuildTools` / `Microsoft.Windows.SDK.CPP` / `Microsoft.Windows.SDK.CPP.x64`。构建前 dot-source 一个脚本即可：
 
 ```powershell
-$sdk = "D:\tmp\sdk\nuget"; $vc = "D:\codex\VSBuildTools\VC\Tools\MSVC\14.44.35207"
-$inc = "$sdk\Microsoft.Windows.SDK.CPP\c\Include\10.0.28000.0"; $bin = "$sdk\Microsoft.Windows.SDK.CPP\c\bin\10.0.28000.0\x64"
-$env:PATH = "D:\codex\.cargo\bin;$vc\bin\Hostx64\x64;$bin;$sdk\Microsoft.Windows.SDK.BuildTools\bin\10.0.28000.0\x64;$env:PATH"
-$env:INCLUDE = "$vc\include;$inc\um;$inc\shared;$inc\ucrt;$inc\winrt"
-$env:LIB = "$sdk\Microsoft.Windows.SDK.CPP.x64\c\um\x64;$sdk\Microsoft.Windows.SDK.CPP.x64\c\ucrt\x64;$vc\lib\x64"
-$env:RC = "$sdk\Microsoft.Windows.SDK.BuildTools\bin\10.0.28000.0\x64\rc.exe"
-$env:GPUI_FXC_PATH = "$bin\fxc.exe"
+. D:\codex\winsdk\env.ps1     # 设 PATH / INCLUDE / LIB / RC / GPUI_FXC_PATH
+cargo build --release
 ```
 
-`D:\tmp` 会被清理；长期做法是重新安装 Windows SDK（安装程序要管理员）。
+脚本里 `$vc = D:\codex\VSBuildTools\VC\Tools\MSVC\14.44.35207`，SDK 是 `10.0.28000.0`。C 盘 `Windows Kits\10` 只剩之前误装进去的 `Debuggers`（约 328 MB），删除需要管理员。
 - 测试：`cargo test --release -p grids_core`，`-p grids`。
 - 构建前先关掉正在运行的实例（进程名形如 `grids-0.9.11`，`Get-Process grids` 匹配不到）。
 - 测试数据：`D:\mock\grids\`，配置 `D:\mock\config\{a,b-dark,c-locked,d-compare}.json`。
